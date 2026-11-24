@@ -1,0 +1,31 @@
+{
+  "functions": {
+    "src/app/api/stock/[symbol]/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/stock/[symbol]/pdf/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/stock/[symbol]/replay/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/market/overview/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/scanner/iaa/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/scanner/research/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/scanner/news-picks/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/portfolio/weekly/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/chat/route.ts": {
+      "maxDuration": 60
+    }
+  }
+}
