@@ -19,21 +19,22 @@ import {
   SentimentBadge,
   SkeletonCard,
 } from "@/components/common/UiPrimitives";
+import { formatPrice } from "@/lib/markets";
 import type { MarketOverviewPayload, NewsImpactResult } from "@/lib/types";
 import { useAppStore } from "@/store/useAppStore";
 
 const IMPACT_PRESETS = [
   {
-    label: "ตัวอย่าง: ราคาน้ำมันดิบปรับขึ้นแรง",
-    text: "ราคาน้ำมันดิบเบรนท์ปรับตัวพุ่งขึ้นกว่า 4% จากความตึงเครียดตะวันออกกลางและกำลังการผลิตที่ตึงตัว ส่งผลต่อต้นทุนพลังงาน สายการบิน ปิโตรเคมี และหุ้นกลุ่มสำรวจผลิตน้ำมันของไทย เช่น PTTEP, PTT, TOP, AOT",
+    label: "ตัวอย่าง: Fed ส่งสัญญาณลดดอกเบี้ย & ยีลด์ 10Y ร่วง",
+    text: "ธนาคารกลางสหรัฐฯ (Fed) ส่งสัญญาณผ่อนคลายนโยบายการเงินและปรับลดอัตราดอกเบี้ยเร็วกว่าคาด ส่งผลให้บอนด์ยีลด์สหรัฐฯ 10 ปีปรับตัวลงแรง หนุนหุ้นกลุ่มเทคโนโลยี AI เซมิคอนดักเตอร์ และหุ้นเติบโตใน S&P 500 / Nasdaq 100 เช่น NVDA, AAPL, MSFT, META, AVGO, QQQ รวมถึง DR หุ้นสหรัฐฯ อย่าง NVDA80 และ NDX01",
   },
   {
-    label: "ตัวอย่าง: กนง. ปรับลดอัตราดอกเบี้ยนโยบาย",
-    text: "คณะกรรมการนโยบายการเงิน (กนง.) มีมติปรับลดอัตราดอกเบี้ยนโยบายลง 0.25% เพื่อกระตุ้นเศรษฐกิจและบรรเทาภาระหนี้ครัวเรือน กระทบกลุ่มธนาคาร ไฟแนนซ์เช่าซื้อ อสังหาริมทรัพย์ และรีท เช่น MTC, SAWAD, TIDLOR, AP, SPALI, KBANK, BBL",
+    label: "ตัวอย่าง: จีน/PBOC ออกมาตรการกระตุ้นเศรษฐกิจครั้งใหญ่",
+    text: "ธนาคารกลางจีน (PBOC) และรัฐบาลจีนประกาศแพ็กเกจกระตุ้นเศรษฐกิจรอบใหม่ ลด RRR และอัดฉีดสภาพคล่องหนุนตลาดทุนและการบริโภคในประเทศ หนุนหุ้นฮ่องกง (HKEX), จีน A-Share และ China US ADR เช่น 0700.HK (Tencent), 9988.HK (Alibaba), 1211.HK (BYD), 3690.HK (Meituan), 600519.SS (Moutai), BABA, PDD และ DR อย่าง TENCENT80, CN01",
   },
   {
-    label: "ตัวอย่าง: นักท่องเที่ยวต่างชาติทำสถิติใหม่",
-    text: "จำนวนนักท่องเที่ยวต่างชาติเดินทางเข้าไทยเดือนล่าสุดเติบโตโดดเด่นรับไฮซีซัน ยอดผู้โดยสารสุวรรณภูมิและดอนเมืองพุ่งสูงสุดหลังโควิด หนุนรายได้สนามบิน โรงแรม ค้าปลีก และโรงพยาบาล เช่น AOT, MINT, CENTEL, ERW, CPALL, BDMS",
+    label: "ตัวอย่าง: สหรัฐฯ เพิ่มมาตรการจำกัดส่งออกชิป AI & ภาษีนำเข้าจีน",
+    text: "รัฐบาลสหรัฐฯ ประกาศยกระดับมาตรการควบคุมการส่งออกชิป AI ขั้นสูงและปรับเพิ่มภาษีนำเข้ารถยนต์ไฟฟ้าและสินค้าเทคโนโลยีจากจีน สร้างแรงกดดันระยะสั้นต่อห่วงโซ่อุปทานเซมิคอนดักเตอร์และหุ้นส่งออกจีน-ฮ่องกง เช่น NVDA, AMD, ASML, 0981.HK (SMIC), 1211.HK (BYD), BABA, KWEB",
   },
 ];
 
@@ -44,6 +45,7 @@ export function NewsTab() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [showRawNews, setShowRawNews] = useState(false);
+  const [radarTf, setRadarTf] = useState<"day" | "week">("day");
 
   // Custom news impact state
   const [newsUrl, setNewsUrl] = useState("");
@@ -165,11 +167,11 @@ export function NewsTab() {
             </div>
           ) : data ? (
             <>
-              {/* 12 Global Macro KPI Cards */}
+              {/* 12 Global Macro & FX KPI Cards */}
               <div>
                 <div className="flex items-center justify-between mb-2.5">
                   <h2 className="text-sm font-bold text-slate-800 dark:text-slate-100">
-                    ภาพรวมดัชนีตลาดโลก ทองคำ น้ำมัน ค่าเงินบาท และบอนด์ยีลด์
+                    ภาพรวมดัชนีหุ้นสหรัฐฯ · ฮ่องกง · จีน · VIX · ทอง/น้ำมัน · และอัตราแลกเปลี่ยน USD/THB & HKD/THB
                   </h2>
                   <span className="text-[11px] text-slate-500 dark:text-slate-400">
                     อัปเดต {new Date(data.generatedAt).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" })} น.
@@ -178,14 +180,17 @@ export function NewsTab() {
                 <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-2.5">
                   {data.macroCards.map((m) => {
                     const up = m.changePct >= 0;
-                    const isSet = m.symbol === "^SET.BK";
+                    const isFx = m.symbol === "THB=X" || m.symbol === "HKDTHB=X";
+                    const isPrimaryUs = m.symbol === "^GSPC" || m.symbol === "^NDX";
                     return (
                       <div
                         key={m.symbol}
                         className={`rounded-xl border p-3 transition ${
-                          isSet
-                            ? "border-sky-500/50 bg-sky-500/10 dark:bg-sky-950/35"
-                            : "border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90"
+                          isFx
+                            ? "border-amber-500/45 bg-amber-500/10 dark:bg-amber-950/25"
+                            : isPrimaryUs
+                              ? "border-sky-500/45 bg-sky-500/10 dark:bg-sky-950/30"
+                              : "border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90"
                         }`}
                       >
                         <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400 truncate">
@@ -220,6 +225,160 @@ export function NewsTab() {
                       </div>
                     );
                   })}
+                </div>
+              </div>
+
+              {/* Index S/R Radar (5 Major Global Indices) */}
+              {data.indexSrRadar && data.indexSrRadar.length > 0 && (
+                <div className="rounded-2xl border border-sky-500/30 bg-white dark:bg-slate-900/95 p-5 space-y-3.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h2 className="text-sm font-bold text-slate-900 dark:text-white">
+                        🎯 Index S/R Radar · แนวรับ-แนวต้านดัชนีหลัก 5 ตลาดโลก (คลิกเปิดกราฟ & Time Machine)
+                      </h2>
+                      <p className="text-xs text-slate-500">
+                        คำนวณด้วย Smart Confluence (Swing Pivot + Volume POC + Fibonacci) เช็กภาพรวมตลาดก่อนเลือกหุ้นรายตัว
+                      </p>
+                    </div>
+                    <div className="inline-flex rounded-xl bg-slate-200/75 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 p-0.5 text-xs">
+                      <button
+                        type="button"
+                        onClick={() => setRadarTf("day")}
+                        className={`px-2.5 py-1 rounded-lg font-bold cursor-pointer ${
+                          radarTf === "day"
+                            ? "bg-sky-500 text-slate-950"
+                            : "text-slate-600 dark:text-slate-300"
+                        }`}
+                      >
+                        Day
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setRadarTf("week")}
+                        className={`px-2.5 py-1 rounded-lg font-bold cursor-pointer ${
+                          radarTf === "week"
+                            ? "bg-sky-500 text-slate-950"
+                            : "text-slate-600 dark:text-slate-300"
+                        }`}
+                      >
+                        Week
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3">
+                    {data.indexSrRadar.map((idx) => {
+                      const sr = radarTf === "week" ? idx.srWeekly : idx.srDaily;
+                      const s1 = sr.supports[0];
+                      const s2 = sr.supports[1];
+                      const r1 = sr.resistances[0];
+                      const r2 = sr.resistances[1];
+                      return (
+                        <button
+                          key={idx.symbol}
+                          type="button"
+                          onClick={() => jumpToStock(idx.displaySymbol, "chart", idx.market)}
+                          className="text-left rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/75 hover:border-sky-400 p-3.5 space-y-2.5 transition cursor-pointer"
+                        >
+                          <div className="flex items-start justify-between gap-1">
+                            <div className="min-w-0">
+                              <div className="text-xs font-extrabold text-slate-900 dark:text-white truncate">
+                                {idx.flag} {idx.displaySymbol}
+                              </div>
+                              <div className="text-[10px] text-slate-500 truncate">{idx.labelTh}</div>
+                            </div>
+                            <span
+                              className={`text-xs font-bold tabular-nums shrink-0 ${
+                                idx.changePct >= 0 ? "text-emerald-500" : "text-rose-500"
+                              }`}
+                            >
+                              {idx.changePct >= 0 ? "+" : ""}
+                              {idx.changePct.toFixed(2)}%
+                            </span>
+                          </div>
+
+                          <div className="flex items-baseline justify-between">
+                            <span className="text-base font-extrabold tabular-nums text-slate-900 dark:text-white">
+                              {idx.price.toLocaleString("en-US", {
+                                minimumFractionDigits: 2,
+                                maximumFractionDigits: 2,
+                              })}
+                            </span>
+                            <span className="text-[10px] text-slate-500 tabular-nums">
+                              RSI {idx.rsi14?.toFixed(0) ?? "-"}
+                            </span>
+                          </div>
+
+                          {/* Mini Price Zone Meter */}
+                          <div className="space-y-1">
+                            <div className="relative h-2 rounded-full bg-gradient-to-r from-emerald-500/40 via-sky-500/20 to-rose-500/40">
+                              <div
+                                className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 h-3.5 w-3.5 rounded-full bg-sky-400 border border-slate-950"
+                                style={{ left: `${Math.max(6, Math.min(94, sr.zonePositionPct))}%` }}
+                              />
+                            </div>
+                            <div className="flex justify-between text-[10px] tabular-nums font-semibold">
+                              <span className="text-emerald-500">
+                                S1 {s1?.price.toLocaleString("en-US", { maximumFractionDigits: 1 }) ?? "-"}
+                              </span>
+                              <span className="text-rose-500">
+                                R1 {r1?.price.toLocaleString("en-US", { maximumFractionDigits: 1 }) ?? "-"}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="pt-1.5 border-t border-slate-200/70 dark:border-slate-800 text-[10px] text-slate-500 space-y-0.5 tabular-nums">
+                            <div>
+                              S2: <strong className="text-emerald-500/80">{s2?.price.toFixed(1) ?? "-"}</strong> ·
+                              R2: <strong className="text-rose-500/80">{r2?.price.toFixed(1) ?? "-"}</strong>
+                            </div>
+                            <div>
+                              POC: <strong className="text-amber-500">{sr.pocPrice.toFixed(1)}</strong>
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Quick Global Market Launchpad (5 International Markets incl. DR) */}
+              <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-4">
+                <div className="text-xs font-bold text-slate-700 dark:text-slate-200 mb-2.5">
+                  ทางลัดเจาะลึกหุ้นเด่น 5 ตลาดต่างประเทศ (คลิกเปิดกราฟ + แนวรับ-แนวต้าน + Time Machine ทันที)
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5 text-xs">
+                  {(
+                    [
+                      { mkt: "SP500" as const, title: "🇺🇸 S&P 500", list: ["^GSPC", "SPY", "NVDA", "LLY", "JPM"] },
+                      { mkt: "NASDAQ100" as const, title: "🇺🇸 Nasdaq 100", list: ["^NDX", "QQQ", "AAPL", "MSFT", "TSLA"] },
+                      { mkt: "HK" as const, title: "🇭🇰 ฮ่องกง (HKEX)", list: ["^HSI", "0700.HK", "9988.HK", "1211.HK", "1810.HK"] },
+                      { mkt: "CHINA" as const, title: "🇨🇳 จีน (A-Share/ADR)", list: ["000001.SS", "600519.SS", "300750.SZ", "BABA", "PDD"] },
+                      { mkt: "DR" as const, title: "🇹🇭 DR หุ้นนอก (฿)", list: ["NVDA80", "AAPL80", "TENCENT80", "BABA80", "NDX01"] },
+                    ]
+                  ).map((grp) => (
+                    <div
+                      key={grp.mkt}
+                      className="rounded-xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200/80 dark:border-slate-800 p-2.5"
+                    >
+                      <div className="text-[11px] font-bold text-slate-500 dark:text-slate-400 mb-1.5">
+                        {grp.title}
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {grp.list.map((sym) => (
+                          <button
+                            key={sym}
+                            type="button"
+                            onClick={() => jumpToStock(sym, "chart", grp.mkt)}
+                            className="px-2 py-1 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 hover:border-sky-400 hover:text-sky-500 font-bold text-[11px] transition cursor-pointer"
+                          >
+                            {sym}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </div>
 
@@ -264,15 +423,15 @@ export function NewsTab() {
                 </div>
               </div>
 
-              {/* Affected Thai Stocks */}
+              {/* Affected Global Stocks */}
               <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-5">
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                   <div>
                     <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                      หุ้นไทยที่เกี่ยวข้องกับประเด็นตลาดโลกและข่าววันนี้
+                      หุ้นสหรัฐฯ · ฮ่องกง · จีน และ DR ที่เกี่ยวข้องกับข่าวตลาดโลกวันนี้
                     </h3>
                     <p className="text-xs text-slate-500 dark:text-slate-400">
-                      คลิกที่ชื่อหุ้นเพื่อเจาะลึกกราฟเทคนิค, เป้า IAA และ Time Machine ทันที
+                      คลิกที่ชื่อหุ้นเพื่อเจาะลึกกราฟเทคนิค, แนวรับ-แนวต้าน, เป้า Consensus และ Time Machine ทันที
                     </p>
                   </div>
                 </div>
@@ -283,7 +442,7 @@ export function NewsTab() {
                     <button
                       key={s.symbol}
                       type="button"
-                      onClick={() => jumpToStock(s.symbol)}
+                      onClick={() => jumpToStock(s.symbol, "chart", s.market)}
                       className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 hover:border-sky-400 hover:bg-sky-500/10 transition cursor-pointer"
                     >
                       <span>
@@ -292,7 +451,7 @@ export function NewsTab() {
                       <span>{s.symbol}</span>
                       {s.price ? (
                         <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400 tabular-nums">
-                          {s.price.toFixed(2)}
+                          {formatPrice(s.price, s.currency)}
                         </span>
                       ) : null}
                     </button>
@@ -304,7 +463,7 @@ export function NewsTab() {
                     {data.affectedStocks.map((s) => (
                       <div
                         key={s.symbol}
-                        onClick={() => jumpToStock(s.symbol)}
+                        onClick={() => jumpToStock(s.symbol, "chart", s.market)}
                         className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 p-3 cursor-pointer hover:border-sky-400 transition"
                       >
                         <div className="flex items-center justify-between">
@@ -319,7 +478,7 @@ export function NewsTab() {
                         </p>
                         {s.price && (
                           <div className="mt-2 text-xs font-semibold tabular-nums">
-                            ราคา {s.price.toFixed(2)} บ.{" "}
+                            ราคา {formatPrice(s.price, s.currency)}{" "}
                             {s.changePct !== undefined && (
                               <span
                                 className={
@@ -351,10 +510,10 @@ export function NewsTab() {
                         {data.affectedStocks.map((s) => (
                           <tr
                             key={s.symbol}
-                            onClick={() => jumpToStock(s.symbol)}
+                            onClick={() => jumpToStock(s.symbol, "chart", s.market)}
                             className="hover:bg-sky-500/5 cursor-pointer transition"
                           >
-                            <td className="py-2.5 pr-3 font-bold text-sky-600 dark:text-sky-400">
+                            <td className="py-2.5 pr-3 font-bold text-sky-600 dark:text-sky-400 whitespace-nowrap">
                               {s.symbol}
                             </td>
                             <td className="py-2.5 px-3 text-slate-600 dark:text-slate-300">
@@ -363,8 +522,8 @@ export function NewsTab() {
                             <td className="py-2.5 px-3">
                               <SentimentBadge bias={s.sentiment} />
                             </td>
-                            <td className="py-2.5 px-3 text-right tabular-nums font-semibold">
-                              {s.price ? `${s.price.toFixed(2)} บ.` : "-"}
+                            <td className="py-2.5 px-3 text-right tabular-nums font-semibold whitespace-nowrap">
+                              {s.price ? formatPrice(s.price, s.currency) : "-"}
                               {s.changePct !== undefined && (
                                 <span
                                   className={`ml-1.5 text-[11px] ${
@@ -387,7 +546,7 @@ export function NewsTab() {
                 )}
               </div>
 
-              {/* Categorized Raw Headlines (7 Categories) */}
+              {/* Categorized Raw Headlines (7 Global Categories) */}
               <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 overflow-hidden">
                 <button
                   type="button"
@@ -396,7 +555,7 @@ export function NewsTab() {
                 >
                   <div className="flex items-center gap-2 text-sm font-bold text-slate-900 dark:text-white">
                     <Newspaper className="h-4 w-4 text-sky-400" />
-                    เปิดดูพาดหัวข่าวด่วน & บทวิเคราะห์โบรกเกอร์ต้นฉบับแยก 7 หมวด ({data.totalHeadlines} รายการล่าสุด)
+                    เปิดดูพาดหัวข่าวตลาดโลก & Wall Street ต้นฉบับแยก 7 หมวด ({data.totalHeadlines} รายการล่าสุด)
                   </div>
                   {showRawNews ? (
                     <ChevronUp className="h-4 w-4 text-slate-400" />
@@ -465,10 +624,10 @@ export function NewsTab() {
           <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-5 space-y-4">
             <div>
               <h2 className="text-sm font-bold text-slate-900 dark:text-white">
-                วิเคราะห์ผลกระทบต่อหุ้นไทยจากลิงก์ข่าว หรือข้อความข่าว
+                วิเคราะห์ผลกระทบต่อหุ้นสหรัฐฯ · ฮ่องกง · จีน · DR จากลิงก์หรือข้อความข่าว
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                วางลิงก์ข่าวหรือข้อความประเด็นร้อน เพื่อให้ AI ประเมินกลุ่มที่ได้/เสียประโยชน์พร้อมรายชื่อหุ้น SET ที่เกี่ยวข้อง
+                วางลิงก์ข่าวต่างประเทศหรือข้อความประเด็นร้อน เพื่อให้ AI ประเมินกลุ่มที่ได้/เสียประโยชน์เป็นภาษาไทยพร้อมรายชื่อหุ้นที่เกี่ยวข้อง
               </p>
             </div>
 
@@ -509,7 +668,7 @@ export function NewsTab() {
                   type="url"
                   value={newsUrl}
                   onChange={(e) => setNewsUrl(e.target.value)}
-                  placeholder="https://www.kaohoon.com/..."
+                  placeholder="https://www.reuters.com/markets/..."
                   className="w-full rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 px-3.5 py-2.5 text-sm outline-none focus:border-sky-400"
                 />
               </div>
@@ -598,14 +757,14 @@ export function NewsTab() {
               {impactResult.affectedStocks.length > 0 && (
                 <div>
                   <div className="text-xs font-bold text-slate-700 dark:text-slate-200 mb-2">
-                    หุ้นไทยที่เกี่ยวข้อง (คลิกเพื่อวิเคราะห์รายตัว)
+                    หุ้นต่างประเทศและ DR ที่เกี่ยวข้อง (คลิกเพื่อวิเคราะห์รายตัว)
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
                     {impactResult.affectedStocks.map((s) => (
                       <button
                         key={s.symbol}
                         type="button"
-                        onClick={() => jumpToStock(s.symbol)}
+                        onClick={() => jumpToStock(s.symbol, "chart", s.market)}
                         className="text-left rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 hover:border-sky-400 p-3 transition cursor-pointer"
                       >
                         <div className="flex items-center justify-between">

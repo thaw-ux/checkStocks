@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  AlertTriangle,
   ArrowDownRight,
   ArrowUpRight,
   BookmarkPlus,
@@ -24,14 +25,17 @@ import {
   Sparkles,
   Star,
   Upload,
-  AlertTriangle,
   XCircle,
 } from "lucide-react";
 import { LightweightCandlestickChart } from "@/components/charts/LightweightCandlestickChart";
 import { TimeMachineChart } from "@/components/charts/TimeMachineChart";
+import { MarketSwitcher } from "@/components/common/MarketSwitcher";
+import { SupportResistancePanel } from "@/components/common/SupportResistancePanel";
 import { DataAuditStrip, SentimentBadge, SkeletonCard } from "@/components/common/UiPrimitives";
+import { currencySymbol, formatPrice, MARKET_CONFIGS } from "@/lib/markets";
 import { calcBoardLotSizing, runTimeMachineSimulation } from "@/lib/quant/timeMachine";
 import type {
+  MarketId,
   PeerMetricRow,
   PointInTimeReplayResult,
   StockAnalysisPayload,
@@ -55,6 +59,8 @@ interface UploadedPdfAnalysis {
 
 export function StockTab() {
   const {
+    activeMarket,
+    setActiveMarket,
     activeSymbol,
     setActiveSymbol,
     stockSubTab,
@@ -76,6 +82,7 @@ export function StockTab() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [expandChart, setExpandChart] = useState(false);
+  const [srTimeframe, setSrTimeframe] = useState<"day" | "week">("day");
   const [copiedLine, setCopiedLine] = useState(false);
   const [showFactSheet, setShowFactSheet] = useState(false);
 
@@ -85,7 +92,7 @@ export function StockTab() {
   const [uploadedPdf, setUploadedPdf] = useState<UploadedPdfAnalysis | null>(null);
 
   // Position sizing & Time Machine state
-  const [portfolioBaht, setPortfolioBaht] = useState(100_000);
+  const [portfolioCapital, setPortfolioCapital] = useState(100_000);
   const [riskPct, setRiskPct] = useState(2);
   const [tmEntry, setTmEntry] = useState(0);
   const [tmStop, setTmStop] = useState(0);
@@ -115,9 +122,16 @@ export function StockTab() {
     setInputTicker(activeSymbol);
   }, [activeSymbol]);
 
+  const handleMarketSwitch = (nextMarket: MarketId) => {
+    setActiveMarket(nextMarket);
+    const cfg = MARKET_CONFIGS[nextMarket];
+    setPortfolioCapital(cfg.defaultCapital);
+    setActiveSymbol(cfg.quickTickers[0]);
+  };
+
   const fetchStock = useCallback(
-    async (sym: string, refresh = false) => {
-      const clean = sym.trim().toUpperCase().replace(/\.BK$/i, "");
+    async (sym: string, mkt: MarketId, refresh = false) => {
+      const clean = sym.trim().toUpperCase();
       if (!clean) return;
       setLoading(true);
       setError("");
@@ -125,6 +139,7 @@ export function StockTab() {
       setReplayResult(null);
       try {
         const params = new URLSearchParams();
+        params.set("market", mkt);
         if (refresh) params.set("refresh", "1");
         if (!extractPdf) params.set("extractPdf", "0");
         if (modelSettings.proModel) params.set("model", modelSettings.proModel);
@@ -132,11 +147,14 @@ export function StockTab() {
         const json = (await res.json()) as StockAnalysisPayload & { error?: string };
         if (!res.ok) throw new Error(json.error || `ไม่พบข้อมูลหุ้น ${clean}`);
         setData(json);
+        if (json.market && json.market !== mkt) {
+          setActiveMarket(json.market);
+        }
+        setPortfolioCapital(MARKET_CONFIGS[json.market || mkt].defaultCapital);
         setIntradayBars(json.intradayBars ?? []);
         setPeersInput(json.defaultPeers.join(", "));
 
-        // Populate Time Machine inputs (prefer prefilled plan if matching symbol!)
-        if (prefilledPlan && prefilledPlan.symbol === clean) {
+        if (prefilledPlan && prefilledPlan.symbol === json.symbol) {
           setTmEntry(prefilledPlan.entry);
           setTmStop(prefilledPlan.stop);
           setTmTarget(prefilledPlan.target);
@@ -152,19 +170,21 @@ export function StockTab() {
         setLoading(false);
       }
     },
-    [extractPdf, modelSettings.proModel, prefilledPlan, clearPrefilledPlan]
+    [extractPdf, modelSettings.proModel, prefilledPlan, clearPrefilledPlan, setActiveMarket]
   );
 
   useEffect(() => {
-    void fetchStock(activeSymbol, false);
-  }, [activeSymbol, fetchStock]);
+    void fetchStock(activeSymbol, activeMarket, false);
+  }, [activeSymbol]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Fetch intraday 5m bars lazily when user selects 1d_5m horizon in Time Machine
+  // Fetch intraday 5m bars lazily when user selects 1d_5m horizon
   useEffect(() => {
     if (tmHorizon !== "1d_5m" || !data || intradayBars.length > 0) return;
     let active = true;
     setLoadingIntraday(true);
-    fetch(`/api/stock/${encodeURIComponent(data.symbol)}?intraday=1&extractPdf=0`)
+    fetch(
+      `/api/stock/${encodeURIComponent(data.symbol)}?market=${data.market}&intraday=1&extractPdf=0`
+    )
       .then((r) => r.json())
       .then((j: StockAnalysisPayload) => {
         if (active && j.intradayBars?.length) {
@@ -181,11 +201,12 @@ export function StockTab() {
   }, [tmHorizon, data, intradayBars.length]);
 
   // Load peers when switching to peers tab
-  const loadPeers = useCallback(async (sym: string, customCsv?: string) => {
+  const loadPeers = useCallback(async (sym: string, mkt: MarketId, customCsv?: string) => {
     setPeersLoading(true);
     try {
-      const q = customCsv ? `?peers=${encodeURIComponent(customCsv)}` : "";
-      const res = await fetch(`/api/stock/${encodeURIComponent(sym)}/peers${q}`);
+      const params = new URLSearchParams({ market: mkt });
+      if (customCsv) params.set("peers", customCsv);
+      const res = await fetch(`/api/stock/${encodeURIComponent(sym)}/peers?${params.toString()}`);
       const json = (await res.json()) as {
         rows?: PeerMetricRow[];
         sectorAverage?: PeerMetricRow;
@@ -201,25 +222,36 @@ export function StockTab() {
 
   useEffect(() => {
     if (stockSubTab === "peers" && data) {
-      void loadPeers(data.symbol, peersInput || data.defaultPeers.join(","));
+      void loadPeers(data.symbol, data.market, peersInput || data.defaultPeers.join(","));
     }
   }, [stockSubTab, data, loadPeers]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Real-time Position Sizing & 10,000-Run Time Machine Calculation (instant <20ms!)
+  const unit = currencySymbol(data?.currency);
+  const lotSize = data?.lotSize ?? 100;
+
   const sizing = useMemo(() => {
     if (!data || tmEntry <= 0 || tmStop <= 0 || tmTarget <= 0) return null;
     return calcBoardLotSizing({
       symbol: data.symbol,
-      portfolioBaht,
+      portfolioBaht: portfolioCapital,
       riskPct,
       entry: tmEntry,
       stop: tmStop,
       target: tmTarget,
+      lotSize: data.lotSize,
+      currency: data.currency,
     });
-  }, [data, portfolioBaht, riskPct, tmEntry, tmStop, tmTarget]);
+  }, [data, portfolioCapital, riskPct, tmEntry, tmStop, tmTarget]);
 
   const tmResult = useMemo(() => {
-    if (!data || tmEntry <= 0 || tmStop <= 0 || tmTarget <= 0 || tmStop >= tmEntry || tmTarget <= tmEntry) {
+    if (
+      !data ||
+      tmEntry <= 0 ||
+      tmStop <= 0 ||
+      tmTarget <= 0 ||
+      tmStop >= tmEntry ||
+      tmTarget <= tmEntry
+    ) {
       return null;
     }
     const sourceBars =
@@ -243,6 +275,7 @@ export function StockTab() {
       const fd = new FormData();
       fd.append("file", file);
       fd.append("model", modelSettings.proModel);
+      fd.append("market", data.market);
       const res = await fetch(`/api/stock/${encodeURIComponent(data.symbol)}/pdf`, {
         method: "POST",
         body: fd,
@@ -271,6 +304,7 @@ export function StockTab() {
           asOfDate: replayDate,
           runAiLeakageCheck: runAiLeakage,
           model: modelSettings.proModel,
+          market: data.market,
         }),
       });
       const json = (await res.json()) as PointInTimeReplayResult & { error?: string };
@@ -285,14 +319,16 @@ export function StockTab() {
 
   function handleCopyLineSummary() {
     if (!data) return;
+    const u = currencySymbol(data.currency);
     const summary = [
       `📊 สรุปหุ้น ${data.symbol} (${data.companyName})`,
-      `ราคา: ${data.technicals.price.toFixed(2)} บ. (${data.technicals.changePct >= 0 ? "+" : ""}${data.technicals.changePct.toFixed(2)}%)`,
+      `ตลาด: ${MARKET_CONFIGS[data.market].flag} ${MARKET_CONFIGS[data.market].label}`,
+      `ราคา: ${formatPrice(data.technicals.price, data.currency)} (${data.technicals.changePct >= 0 ? "+" : ""}${data.technicals.changePct.toFixed(2)}%)`,
       `ฟันธง AI: ${data.aiSynthesis.verdict}`,
       data.iaaConsensus.avgTargetPrice
-        ? `เป้า IAA เฉลี่ย: ${data.iaaConsensus.avgTargetPrice.toFixed(2)} บ. (Upside ${data.iaaConsensus.upsidePct?.toFixed(1)}%, ซื้อ ${data.iaaConsensus.buyCount}/${data.iaaConsensus.totalBrokers} โบรกฯ)`
-        : `เป้า IAA: ไม่มีข้อมูล`,
-      `แผนเทรด 20D: Entry ${data.technicals.price.toFixed(2)} | Stop ${data.technicals.standardStop.toFixed(2)} | Target ${data.technicals.shortTarget.toFixed(2)}`,
+        ? `เป้า Consensus เฉลี่ย: ${formatPrice(data.iaaConsensus.avgTargetPrice, data.currency)} (Upside ${data.iaaConsensus.upsidePct?.toFixed(1)}%, ซื้อ ${data.iaaConsensus.buyCount}/${data.iaaConsensus.totalBrokers} ราย)`
+        : `เป้า Consensus: ไม่มีข้อมูล`,
+      `แผนเทรด 20D (${u}): Entry ${data.technicals.price.toFixed(2)} | Stop ${data.technicals.standardStop.toFixed(2)} | Target ${data.technicals.shortTarget.toFixed(2)}`,
       `แนวรับ S1/S2: ${data.technicals.s1}/${data.technicals.s2} · แนวต้าน R1/R2: ${data.technicals.r1}/${data.technicals.r2}`,
     ].join("\n");
     void navigator.clipboard.writeText(summary);
@@ -300,6 +336,8 @@ export function StockTab() {
     showToast("คัดลอกสรุปส่งต่อ LINE / โน้ต แล้ว");
     setTimeout(() => setCopiedLine(false), 2000);
   }
+
+  const marketQuickTickers = MARKET_CONFIGS[activeMarket].quickTickers;
 
   const subTabs: { id: StockSubTabId; label: string; icon: React.ReactNode }[] = [
     { id: "chart", label: "กราฟเทคนิค", icon: <LineChart className="h-3.5 w-3.5" /> },
@@ -315,14 +353,21 @@ export function StockTab() {
 
   return (
     <div className="space-y-5">
-      {/* Top Search & PDF Upload Bar */}
+      {/* Market Switcher + Search & PDF Upload Bar */}
       <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <MarketSwitcher value={activeMarket} onChange={handleMarketSwitch} />
+          <span className="text-[11px] text-slate-500">
+            พิมพ์ได้ทั้งหุ้น, ดัชนี, ETF และ DR: เช่น `NVDA`, `AAPL`, `^GSPC`, `^NDX`, `0700.HK`, `1211.HK`, `600519.SS`, `BABA`, `NVDA80`
+          </span>
+        </div>
+
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            const clean = inputTicker.trim().toUpperCase().replace(/\.BK$/i, "");
+            const clean = inputTicker.trim().toUpperCase();
             if (clean) {
-              if (clean === activeSymbol) void fetchStock(clean, true);
+              if (clean === activeSymbol) void fetchStock(clean, activeMarket, true);
               else setActiveSymbol(clean);
             }
           }}
@@ -334,7 +379,15 @@ export function StockTab() {
               type="text"
               value={inputTicker}
               onChange={(e) => setInputTicker(e.target.value.toUpperCase())}
-              placeholder="พิมพ์ชื่อย่อหุ้นไทย SET / mai เช่น PTT, CPALL, BDMS, AAI..."
+              placeholder={
+                activeMarket === "DR"
+                  ? "ชื่อย่อ DR หุ้นนอก (บาท) เช่น NVDA80, AAPL80, TENCENT80, BABA80, NDX01, CN01..."
+                  : activeMarket === "HK"
+                    ? "หุ้นฮ่องกง HKEX / ดัชนี เช่น ^HSI, 0700.HK, 9988.HK, 1211.HK, 1810.HK, 0005.HK..."
+                    : activeMarket === "CHINA"
+                      ? "หุ้นจีน A-Share / US ADR เช่น 000001.SS, 600519.SS, 300750.SZ, BABA, PDD, KWEB..."
+                      : "หุ้นสหรัฐฯ / ดัชนี / ETF เช่น ^GSPC, ^NDX, SPY, QQQ, NVDA, AAPL, MSFT, TSLA..."
+              }
               className="w-full pl-9 pr-3 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-sm font-bold tracking-wide uppercase outline-none focus:border-sky-400"
             />
           </div>
@@ -360,7 +413,6 @@ export function StockTab() {
             onClick={() => pdfInputRef.current?.click()}
             disabled={!data || pdfUploading}
             className="px-3.5 py-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:border-amber-400 border border-slate-300 dark:border-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
-            title="อัปโหลดไฟล์ PDF บทวิเคราะห์โบรกเกอร์เพื่อให้ Gemini Pro อ่านและสรุปประเด็นสำคัญ"
           >
             {pdfUploading ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-400" />
@@ -377,14 +429,16 @@ export function StockTab() {
               onChange={(e) => setExtractPdf(e.target.checked)}
               className="accent-sky-500 rounded"
             />
-            <span>สกัด PDF โบรกฯ อัตโนมัติ (Timeout Guard)</span>
+            <span>สกัด PDF โบรกฯ อัตโนมัติ</span>
           </label>
         </form>
 
-        {/* Quick Watchlist pills */}
+        {/* Market Quick Tickers + Watchlist */}
         <div className="flex flex-wrap items-center gap-1.5 pt-1">
-          <span className="text-[11px] text-slate-500 mr-1">หุ้นยอดนิยม / Watchlist:</span>
-          {watchlist.map((sym) => (
+          <span className="text-[11px] text-slate-500 mr-1">
+            {MARKET_CONFIGS[activeMarket].flag} หุ้นเด่น {MARKET_CONFIGS[activeMarket].shortLabel}:
+          </span>
+          {marketQuickTickers.map((sym) => (
             <button
               key={sym}
               type="button"
@@ -399,6 +453,29 @@ export function StockTab() {
             </button>
           ))}
         </div>
+
+        {watchlist.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-slate-200/60 dark:border-slate-800/60">
+            <span className="text-[11px] text-amber-500 font-semibold mr-1 inline-flex items-center gap-1">
+              <Star className="h-3 w-3 fill-amber-400 text-amber-400" />
+              Watchlist:
+            </span>
+            {watchlist.map((sym) => (
+              <button
+                key={sym}
+                type="button"
+                onClick={() => setActiveSymbol(sym)}
+                className={`px-2 py-0.5 rounded-md text-[11px] font-semibold transition cursor-pointer ${
+                  sym === activeSymbol
+                    ? "bg-amber-500/20 text-amber-600 dark:text-amber-300 border border-amber-500/40"
+                    : "bg-slate-100/80 dark:bg-slate-900 text-slate-600 dark:text-slate-400 hover:text-sky-400 border border-slate-200/80 dark:border-slate-800"
+                }`}
+              >
+                {sym}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {error && (
@@ -414,16 +491,18 @@ export function StockTab() {
         </div>
       ) : data ? (
         <>
-          {/* Hero Price + IAA Consensus Grid */}
+          {/* Hero Price + Consensus Grid */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            {/* Stock Price Header */}
             <div className="lg:col-span-2 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-5 flex flex-col justify-between gap-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <h1 className="text-2xl font-extrabold tracking-tight text-slate-900 dark:text-white">
                       {data.symbol}
                     </h1>
+                    <span className="text-[11px] px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-600 dark:text-sky-300 border border-sky-500/30 font-bold">
+                      {MARKET_CONFIGS[data.market].flag} {MARKET_CONFIGS[data.market].shortLabel} · {data.currency}
+                    </span>
                     <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-medium">
                       {data.sector}
                     </span>
@@ -445,8 +524,7 @@ export function StockTab() {
 
                 <div className="text-right">
                   <div className="text-3xl font-extrabold tabular-nums text-slate-900 dark:text-white">
-                    {data.technicals.price.toFixed(2)}{" "}
-                    <span className="text-sm font-normal text-slate-400">บ.</span>
+                    {formatPrice(data.technicals.price, data.currency)}
                   </div>
                   <div
                     className={`inline-flex items-center gap-0.5 text-sm font-bold tabular-nums ${
@@ -486,7 +564,7 @@ export function StockTab() {
                     val: data.technicals.volRatio ? `${data.technicals.volRatio.toFixed(2)}x` : "-",
                   },
                   {
-                    label: "Mkt Cap",
+                    label: `Mkt Cap (${data.currency})`,
                     val: data.fundamentals.marketCapBillion
                       ? `${data.fundamentals.marketCapBillion.toFixed(1)}B`
                       : "-",
@@ -496,7 +574,7 @@ export function StockTab() {
                     key={m.label}
                     className="rounded-lg bg-slate-50 dark:bg-slate-950/70 border border-slate-200/70 dark:border-slate-800/70 px-2.5 py-2"
                   >
-                    <div className="text-[10px] text-slate-500">{m.label}</div>
+                    <div className="text-[10px] text-slate-500 truncate">{m.label}</div>
                     <div className="text-xs font-bold tabular-nums text-slate-900 dark:text-slate-100 mt-0.5">
                       {m.val}
                     </div>
@@ -505,12 +583,12 @@ export function StockTab() {
               </div>
             </div>
 
-            {/* IAA Consensus Summary Card */}
+            {/* Analyst Consensus Summary Card */}
             <div className="rounded-2xl border border-amber-500/30 bg-gradient-to-br from-amber-500/10 via-white to-white dark:from-amber-500/10 dark:via-slate-900 dark:to-slate-900 p-5 flex flex-col justify-between">
               <div>
                 <div className="flex items-center justify-between gap-2 mb-2">
                   <span className="text-[11px] font-bold uppercase tracking-wider text-amber-600 dark:text-amber-300">
-                    IAA / CONSENSUS เป้า 12 เดือน
+                    ANALYST CONSENSUS 12 เดือน
                   </span>
                   <a
                     href={data.iaaConsensus.settradeUrl}
@@ -518,7 +596,7 @@ export function StockTab() {
                     rel="noopener noreferrer"
                     className="text-[11px] text-sky-500 hover:underline inline-flex items-center gap-1"
                   >
-                    Settrade <ExternalLink className="h-3 w-3" />
+                    Yahoo Finance <ExternalLink className="h-3 w-3" />
                   </a>
                 </div>
 
@@ -526,7 +604,7 @@ export function StockTab() {
                   <>
                     <div className="flex items-baseline gap-2.5">
                       <span className="text-3xl font-extrabold tabular-nums text-slate-900 dark:text-white">
-                        {data.iaaConsensus.avgTargetPrice.toFixed(2)} บ.
+                        {formatPrice(data.iaaConsensus.avgTargetPrice, data.currency)}
                       </span>
                       {data.iaaConsensus.upsidePct !== null && (
                         <span
@@ -543,8 +621,8 @@ export function StockTab() {
                     </div>
                     <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">
                       ช่วงเป้าหมาย: {data.iaaConsensus.lowTargetPrice?.toFixed(2) ?? "-"} –{" "}
-                      {data.iaaConsensus.highTargetPrice?.toFixed(2) ?? "-"} บ. (ค่ากลาง{" "}
-                      {data.iaaConsensus.medianTargetPrice?.toFixed(2) ?? "-"} บ.)
+                      {data.iaaConsensus.highTargetPrice?.toFixed(2) ?? "-"} {unit} (ค่ากลาง{" "}
+                      {data.iaaConsensus.medianTargetPrice?.toFixed(2) ?? "-"})
                     </div>
                   </>
                 ) : (
@@ -561,13 +639,13 @@ export function StockTab() {
                   <span className="text-rose-500">ขาย {data.iaaConsensus.sellCount}</span>
                 </div>
                 <span className="text-[11px] text-slate-500">
-                  รวม {data.iaaConsensus.totalBrokers} โบรกฯ
+                  รวม {data.iaaConsensus.totalBrokers} ราย
                 </span>
               </div>
             </div>
           </div>
 
-          {/* Uploaded PDF Gemini Pro Analysis Card (if user uploaded one) */}
+          {/* Uploaded PDF Card */}
           {uploadedPdf && (
             <div className="rounded-2xl border border-amber-400/45 bg-amber-500/10 p-5 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -578,7 +656,7 @@ export function StockTab() {
                   <div className="text-sm font-bold text-slate-900 dark:text-white mt-0.5">
                     {uploadedPdf.brokerName} · คำแนะนำ: {uploadedPdf.rating}
                     {uploadedPdf.targetPrice
-                      ? ` · เป้า ${uploadedPdf.targetPrice.toFixed(2)} บ. (${uploadedPdf.upsidePct !== null ? `${uploadedPdf.upsidePct >= 0 ? "+" : ""}${uploadedPdf.upsidePct}%` : ""})`
+                      ? ` · เป้า ${formatPrice(uploadedPdf.targetPrice, data.currency)} (${uploadedPdf.upsidePct !== null ? `${uploadedPdf.upsidePct >= 0 ? "+" : ""}${uploadedPdf.upsidePct}%` : ""})`
                       : ""}
                   </div>
                 </div>
@@ -614,7 +692,6 @@ export function StockTab() {
             </div>
           )}
 
-          {/* Data Audit Strip */}
           <DataAuditStrip items={data.dataAudit} />
 
           {/* Single-Pass AI Synthesis Card */}
@@ -646,7 +723,6 @@ export function StockTab() {
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* Bull Case */}
               <div className="rounded-xl bg-emerald-500/5 border border-emerald-500/20 p-3.5 space-y-2">
                 <div className="text-xs font-bold text-emerald-600 dark:text-emerald-400">
                   ปัจจัยสนับสนุน (Bull Case)
@@ -672,7 +748,6 @@ export function StockTab() {
                 </ul>
               </div>
 
-              {/* Bear Case */}
               <div className="rounded-xl bg-rose-500/5 border border-rose-500/20 p-3.5 space-y-2">
                 <div className="text-xs font-bold text-rose-600 dark:text-rose-400">
                   ปัจจัยเสี่ยงและข้อจำกัดข้อมูล (Bear Case)
@@ -699,11 +774,10 @@ export function StockTab() {
               </div>
             </div>
 
-            {/* Technical Levels Strip + Quick Actions */}
             <div className="rounded-xl bg-slate-50 dark:bg-slate-950/75 border border-slate-200 dark:border-slate-800 p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs">
               <div className="space-y-1">
                 <div className="font-semibold text-slate-800 dark:text-slate-200 tabular-nums">
-                  กรอบเทคนิคระยะสั้น (20D): แนวรับ{" "}
+                  กรอบเทคนิคระยะสั้น (20D · {unit}): แนวรับ{" "}
                   <span className="text-emerald-500">
                     S1 {data.technicals.s1.toFixed(2)} / S2 {data.technicals.s2.toFixed(2)}
                   </span>{" "}
@@ -712,26 +786,26 @@ export function StockTab() {
                     R1 {data.technicals.r1.toFixed(2)} / R2 {data.technicals.r2.toFixed(2)}
                   </span>{" "}
                   · Stop มาตรฐาน{" "}
-                  <span className="text-rose-400">{data.technicals.standardStop.toFixed(2)} บ.</span>
+                  <span className="text-rose-400">
+                    {formatPrice(data.technicals.standardStop, data.currency)}
+                  </span>
                 </div>
                 <div className="text-[11px] text-slate-500 dark:text-slate-400">
                   {data.aiSynthesis.fundamentalView12M}
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setStockSubTab("timemachine")}
-                  className="px-3 py-1.5 rounded-lg bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs inline-flex items-center gap-1.5 transition cursor-pointer"
-                >
-                  <FlaskConical className="h-3.5 w-3.5" />
-                  ทดสอบ Time Machine
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => setStockSubTab("timemachine")}
+                className="px-3 py-1.5 rounded-lg bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs inline-flex items-center gap-1.5 transition cursor-pointer"
+              >
+                <FlaskConical className="h-3.5 w-3.5" />
+                ทดสอบ Time Machine
+              </button>
             </div>
           </div>
 
-          {/* 5 Sub-Tabs Navigation */}
+          {/* 5 Sub-Tabs */}
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap gap-1.5">
               {subTabs.map((t) => (
@@ -763,11 +837,11 @@ export function StockTab() {
             )}
           </div>
 
-          {/* SUB-TAB 1: Technical Chart */}
+          {/* SUB-TAB 1: Technical Chart + Smart Confluence S/R Panel */}
           {stockSubTab === "chart" && (
-            <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-5 space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                <div className="font-semibold text-slate-800 dark:text-slate-200">
+            <div className="space-y-4">
+              <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-5 space-y-3">
+                <div className="text-xs font-semibold text-slate-800 dark:text-slate-200">
                   สถานะแนวโน้ม: <span className="text-sky-500">{data.technicals.trendLabel}</span> ·
                   RSI(14) ={" "}
                   <span className="tabular-nums font-bold">
@@ -778,31 +852,61 @@ export function StockTab() {
                     {data.technicals.macdHist?.toFixed(3) ?? "-"}
                   </span>
                 </div>
+                <LightweightCandlestickChart
+                  symbol={data.yahooSymbol}
+                  bars={data.bars}
+                  entry={tmEntry || data.technicals.price}
+                  stop={tmStop || data.technicals.standardStop}
+                  target={tmTarget || data.technicals.shortTarget}
+                  srDaily={data.srDaily}
+                  srWeekly={data.srWeekly}
+                  srTimeframe={srTimeframe}
+                  onChangeSrTimeframe={setSrTimeframe}
+                  theme={theme}
+                  expanded={expandChart}
+                />
               </div>
-              <LightweightCandlestickChart
-                symbol={data.symbol}
-                bars={data.bars}
-                entry={tmEntry || data.technicals.price}
-                stop={tmStop || data.technicals.standardStop}
-                target={tmTarget || data.technicals.shortTarget}
-                theme={theme}
-                expanded={expandChart}
-              />
+
+              {data.srDaily && data.srWeekly && (
+                <SupportResistancePanel
+                  symbol={data.symbol}
+                  currency={data.currency}
+                  srDaily={data.srDaily}
+                  srWeekly={data.srWeekly}
+                  timeframe={srTimeframe}
+                  onTimeframeChange={setSrTimeframe}
+                  onApplyLevel={(role, price, label) => {
+                    if (role === "entry") {
+                      setTmEntry(price);
+                      if (tmStop >= price) setTmStop(Number((price * 0.96).toFixed(2)));
+                    } else if (role === "stop") {
+                      setTmStop(price);
+                    } else {
+                      setTmTarget(price);
+                    }
+                    setStockSubTab("timemachine");
+                    showToast(
+                      `ตั้ง ${label} (${price.toFixed(2)}) เป็น ${
+                        role === "entry" ? "Entry" : role === "stop" ? "Stop Loss" : "Target"
+                      } ใน Time Machine แล้ว`
+                    );
+                  }}
+                />
+              )}
             </div>
           )}
 
-          {/* SUB-TAB 2: Trade Plan (Board Lot) & Time Machine 10,000 Runs */}
+          {/* SUB-TAB 2: Trade Plan & Time Machine 10,000 Runs */}
           {stockSubTab === "timemachine" && (
             <div className="space-y-4">
-              {/* Position Sizing Calculator */}
               <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-5 space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                      คำนวณขนาดไม้ตามกฎ Board Lot (ทีละ 100 หุ้น) & แผนเทรด
+                      คำนวณขนาดไม้ ({lotSize === 100 ? "Board Lot ทีละ 100 หุ้น · HKEX/A-Share" : "ทีละ 1 หุ้น · ตลาดสหรัฐฯ/DR"}) & แผนเทรด
                     </h3>
                     <p className="text-xs text-slate-500">
-                      ปรับตัวเลขด้านล่างเพื่อคำนวณจำนวนหุ้นและรัน Time Machine 10,000 รอบทันทีแบบเรียลไทม์
+                      ปรับตัวเลขด้านล่างเพื่อคำนวณจำนวนหุ้น ({data.currency}) และรัน Time Machine 10,000 รอบทันที
                     </p>
                   </div>
                   <div className="flex flex-wrap gap-1.5">
@@ -815,7 +919,7 @@ export function StockTab() {
                       }}
                       className="text-xs px-2.5 py-1 rounded-lg bg-sky-500/15 text-sky-600 dark:text-sky-300 border border-sky-500/30 font-semibold cursor-pointer"
                     >
-                      ใช้แนวต้านระยะสั้น ({data.technicals.shortTarget.toFixed(2)} บ.)
+                      ใช้แนวต้านสั้น ({formatPrice(data.technicals.shortTarget, data.currency)})
                     </button>
                     {data.iaaConsensus.avgTargetPrice &&
                       data.iaaConsensus.avgTargetPrice > data.technicals.price && (
@@ -828,7 +932,7 @@ export function StockTab() {
                           }}
                           className="text-xs px-2.5 py-1 rounded-lg bg-amber-500/15 text-amber-600 dark:text-amber-300 border border-amber-500/30 font-semibold cursor-pointer"
                         >
-                          ใช้เป้า IAA เฉลี่ย ({data.iaaConsensus.avgTargetPrice.toFixed(2)} บ.)
+                          ใช้เป้า Consensus ({formatPrice(data.iaaConsensus.avgTargetPrice, data.currency)})
                         </button>
                       )}
                   </div>
@@ -836,13 +940,15 @@ export function StockTab() {
 
                 <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
                   <div>
-                    <label className="block text-[11px] text-slate-500 mb-1">เงินทุนพอร์ต (บาท)</label>
+                    <label className="block text-[11px] text-slate-500 mb-1">
+                      เงินทุนพอร์ต ({data.currency})
+                    </label>
                     <input
                       type="number"
-                      step={10000}
-                      min={10000}
-                      value={portfolioBaht}
-                      onChange={(e) => setPortfolioBaht(Math.max(1000, Number(e.target.value)))}
+                      step={data.currency === "USD" ? 1000 : 10000}
+                      min={1000}
+                      value={portfolioCapital}
+                      onChange={(e) => setPortfolioCapital(Math.max(500, Number(e.target.value)))}
                       className="w-full rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 px-3 py-2 text-sm font-bold tabular-nums outline-none focus:border-sky-400"
                     />
                   </div>
@@ -859,7 +965,9 @@ export function StockTab() {
                     />
                   </div>
                   <div>
-                    <label className="block text-[11px] text-sky-500 font-semibold mb-1">ราคาเข้า Entry (บ.)</label>
+                    <label className="block text-[11px] text-sky-500 font-semibold mb-1">
+                      ราคาเข้า Entry ({unit})
+                    </label>
                     <input
                       type="number"
                       step={0.05}
@@ -869,7 +977,9 @@ export function StockTab() {
                     />
                   </div>
                   <div>
-                    <label className="block text-[11px] text-rose-500 font-semibold mb-1">จุดตัดขาดทุน Stop (บ.)</label>
+                    <label className="block text-[11px] text-rose-500 font-semibold mb-1">
+                      จุดตัดขาดทุน Stop ({unit})
+                    </label>
                     <input
                       type="number"
                       step={0.05}
@@ -879,7 +989,9 @@ export function StockTab() {
                     />
                   </div>
                   <div>
-                    <label className="block text-[11px] text-emerald-500 font-semibold mb-1">เป้าหมายขาย Target (บ.)</label>
+                    <label className="block text-[11px] text-emerald-500 font-semibold mb-1">
+                      เป้าหมายขาย Target ({unit})
+                    </label>
                     <input
                       type="number"
                       step={0.05}
@@ -894,18 +1006,20 @@ export function StockTab() {
                   <>
                     <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                       <div className="rounded-xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 p-3">
-                        <div className="text-[11px] text-slate-500">จำนวนหุ้นแนะนำ (Board Lot)</div>
+                        <div className="text-[11px] text-slate-500">จำนวนหุ้นแนะนำ</div>
                         <div className="text-lg font-extrabold text-sky-500 tabular-nums mt-0.5">
                           {sizing.shares.toLocaleString()} หุ้น
                         </div>
                         <div className="text-[11px] text-slate-400">
-                          {sizing.shares / 100} ล็อต (ทีละ 100 หุ้น)
+                          {lotSize === 100
+                            ? `${sizing.shares / 100} ล็อต (ทีละ 100 หุ้น)`
+                            : "หน่วยละ 1 หุ้น"}
                         </div>
                       </div>
                       <div className="rounded-xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 p-3">
                         <div className="text-[11px] text-slate-500">มูลค่าเงินลงทุน</div>
                         <div className="text-lg font-extrabold tabular-nums mt-0.5">
-                          {sizing.positionValue.toLocaleString()} บ.
+                          {sizing.positionValue.toLocaleString()} {unit}
                         </div>
                         <div className="text-[11px] text-slate-400">
                           {sizing.portfolioAllocPct}% ของพอร์ต
@@ -917,15 +1031,19 @@ export function StockTab() {
                           1 : {sizing.rrRatio.toFixed(2)}
                         </div>
                         <div className="text-[11px] text-slate-400">
-                          เสี่ยง {sizing.riskPerShare} / เป้า +{sizing.rewardPerShare} บ.
+                          เสี่ยง {sizing.riskPerShare} / เป้า +{sizing.rewardPerShare} {unit}
                         </div>
                       </div>
                       <div className="rounded-xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 p-3">
                         <div className="text-[11px] text-slate-500">ขาดทุนสูงสุด / กำไรตามเป้า</div>
                         <div className="text-sm font-extrabold tabular-nums mt-1">
-                          <span className="text-rose-500">-{sizing.maxLossBaht.toLocaleString()} บ.</span>
+                          <span className="text-rose-500">
+                            -{sizing.maxLossBaht.toLocaleString()} {unit}
+                          </span>
                           <span className="mx-1 text-slate-500">/</span>
-                          <span className="text-emerald-500">+{sizing.targetGainBaht.toLocaleString()} บ.</span>
+                          <span className="text-emerald-500">
+                            +{sizing.targetGainBaht.toLocaleString()} {unit}
+                          </span>
                         </div>
                       </div>
                     </div>
@@ -950,9 +1068,11 @@ export function StockTab() {
                           onClick={() =>
                             addPaperTrade({
                               symbol: data.symbol,
+                              market: data.market,
+                              currency: data.currency,
                               status: "open",
                               entryPrice: tmEntry,
-                              shares: Math.max(100, sizing.shares),
+                              shares: Math.max(lotSize, sizing.shares),
                               stopLoss: tmStop,
                               targetPrice: tmTarget,
                               entryDate: new Date().toISOString().slice(0, 10),
@@ -982,7 +1102,7 @@ export function StockTab() {
                       TIME MACHINE · ทดสอบแผน 10,000 รอบก่อนเสียเงินจริง
                     </div>
                     <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                      จำลองเส้นทางราคา 10,000 รอบจากพฤติกรรมแท่งเทียน OHLC จริงในอดีตของหุ้น {data.symbol} เอง
+                      จำลองเส้นทางราคา 10,000 รอบจากพฤติกรรมแท่งเทียน OHLC จริงในอดีตของหุ้น {data.symbol}
                     </p>
                   </div>
 
@@ -994,9 +1114,9 @@ export function StockTab() {
                       className="rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 px-3 py-2 text-xs font-semibold outline-none focus:border-sky-400"
                     >
                       <option value="5d">Swing 5 วันทำการ (เก็งกำไรระยะสั้น)</option>
-                      <option value="10d">Swing 10 วันทำการ (มาตรฐานหุ้นไทย)</option>
+                      <option value="10d">Swing 10 วันทำการ (มาตรฐาน 2 สัปดาห์)</option>
                       <option value="20d">Swing 20 วันทำการ (ถือรอรอบ 1 เดือน)</option>
-                      <option value="1d_5m">Intraday 1 วันทำการ (แท่ง 5 นาที · หุ้นใหญ่)</option>
+                      <option value="1d_5m">Intraday 1 วันทำการ (แท่ง 5 นาที)</option>
                     </select>
                   </div>
                 </div>
@@ -1006,76 +1126,71 @@ export function StockTab() {
                     กรุณาตั้งค่าให้ <strong>Stop Loss &lt; Entry &lt; Target</strong> เพื่อให้ Time Machine จำลองราคา 10,000 รอบได้ถูกต้อง
                   </div>
                 ) : (
-                  <>
-                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-                      <div className="lg:col-span-2">
-                        <TimeMachineChart result={tmResult} theme={theme} />
-                      </div>
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                    <div className="lg:col-span-2">
+                      <TimeMachineChart result={tmResult} theme={theme} />
+                    </div>
+                    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/75 p-4 flex flex-col justify-between space-y-4">
+                      <div className="space-y-3">
+                        <div className="text-xs font-bold text-slate-700 dark:text-slate-200">
+                          ผลลัพธ์จาก {tmResult.simulations.toLocaleString()} รอบจำลอง
+                        </div>
+                        <SentimentBadge bias={tmResult.verdictBias} label={tmResult.verdictLabel} />
 
-                      {/* Verdict Panel */}
-                      <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/75 p-4 flex flex-col justify-between space-y-4">
-                        <div className="space-y-3">
-                          <div className="text-xs font-bold text-slate-700 dark:text-slate-200">
-                            ผลลัพธ์จาก {tmResult.simulations.toLocaleString()} รอบจำลอง
-                          </div>
-                          <SentimentBadge bias={tmResult.verdictBias} label={tmResult.verdictLabel} />
-
-                          <div className="grid grid-cols-3 gap-2 pt-1">
-                            <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/25 p-2.5 text-center">
-                              <div className="text-[10px] text-emerald-500 font-semibold">ถึงเป้าก่อน</div>
-                              <div className="text-lg font-extrabold text-emerald-500 tabular-nums">
-                                {tmResult.hitTargetPct}%
-                              </div>
-                            </div>
-                            <div className="rounded-lg bg-rose-500/10 border border-rose-500/25 p-2.5 text-center">
-                              <div className="text-[10px] text-rose-500 font-semibold">ชน Stop ก่อน</div>
-                              <div className="text-lg font-extrabold text-rose-500 tabular-nums">
-                                {tmResult.hitStopPct}%
-                              </div>
-                            </div>
-                            <div className="rounded-lg bg-slate-500/10 border border-slate-500/25 p-2.5 text-center">
-                              <div className="text-[10px] text-slate-400 font-semibold">ไม่ถึงทั้งคู่</div>
-                              <div className="text-lg font-extrabold text-slate-400 tabular-nums">
-                                {tmResult.unresolvedPct}%
-                              </div>
+                        <div className="grid grid-cols-3 gap-2 pt-1">
+                          <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/25 p-2.5 text-center">
+                            <div className="text-[10px] text-emerald-500 font-semibold">ถึงเป้าก่อน</div>
+                            <div className="text-lg font-extrabold text-emerald-500 tabular-nums">
+                              {tmResult.hitTargetPct}%
                             </div>
                           </div>
-
-                          <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3">
-                            <div className="text-[11px] text-slate-500">สรุปความคุ้มค่า (Expectancy / R)</div>
-                            <div
-                              className={`text-2xl font-extrabold tabular-nums mt-0.5 ${
-                                tmResult.expectancyR > 0
-                                  ? "text-emerald-500"
-                                  : tmResult.expectancyR < 0
-                                    ? "text-rose-500"
-                                    : "text-amber-500"
-                              }`}
-                            >
-                              {tmResult.expectancyR >= 0 ? "+" : ""}
-                              {tmResult.expectancyR.toFixed(2)}R
+                          <div className="rounded-lg bg-rose-500/10 border border-rose-500/25 p-2.5 text-center">
+                            <div className="text-[10px] text-rose-500 font-semibold">ชน Stop ก่อน</div>
+                            <div className="text-lg font-extrabold text-rose-500 tabular-nums">
+                              {tmResult.hitStopPct}%
                             </div>
-                            <div className="text-[11px] text-slate-500 mt-0.5">
-                              ค่าคาดหวังเฉลี่ยต่อ 1 หน่วยความเสี่ยงใน {tmResult.steps} แท่ง
+                          </div>
+                          <div className="rounded-lg bg-slate-500/10 border border-slate-500/25 p-2.5 text-center">
+                            <div className="text-[10px] text-slate-400 font-semibold">ไม่ถึงทั้งคู่</div>
+                            <div className="text-lg font-extrabold text-slate-400 tabular-nums">
+                              {tmResult.unresolvedPct}%
                             </div>
                           </div>
                         </div>
 
-                        {/* Historical Real-Chart Backcheck */}
-                        <div className="rounded-xl bg-sky-500/10 border border-sky-500/25 p-3 text-xs">
-                          <div className="font-bold text-sky-600 dark:text-sky-300 mb-1">
-                            ย้อนเช็กกราฟจริงในอดีต ({tmResult.historicalBackcheck.totalCases} รอบ)
+                        <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3">
+                          <div className="text-[11px] text-slate-500">สรุปความคุ้มค่า (Expectancy / R)</div>
+                          <div
+                            className={`text-2xl font-extrabold tabular-nums mt-0.5 ${
+                              tmResult.expectancyR > 0
+                                ? "text-emerald-500"
+                                : tmResult.expectancyR < 0
+                                  ? "text-rose-500"
+                                  : "text-amber-500"
+                            }`}
+                          >
+                            {tmResult.expectancyR >= 0 ? "+" : ""}
+                            {tmResult.expectancyR.toFixed(2)}R
                           </div>
-                          <div className="text-slate-700 dark:text-slate-300 tabular-nums">
-                            ถึงเป้า <strong className="text-emerald-500">{tmResult.historicalBackcheck.hitTarget}</strong> ·
-                            โดนตัด <strong className="text-rose-500">{tmResult.historicalBackcheck.hitStop}</strong> ·
-                            ไม่ถึงทั้งคู่ <strong>{tmResult.historicalBackcheck.unresolved}</strong>{" "}
-                            (Win {tmResult.historicalBackcheck.winRatePct}%)
+                          <div className="text-[11px] text-slate-500 mt-0.5">
+                            ค่าคาดหวังเฉลี่ยต่อ 1 หน่วยความเสี่ยงใน {tmResult.steps} แท่ง
                           </div>
+                        </div>
+                      </div>
+
+                      <div className="rounded-xl bg-sky-500/10 border border-sky-500/25 p-3 text-xs">
+                        <div className="font-bold text-sky-600 dark:text-sky-300 mb-1">
+                          ย้อนเช็กกราฟจริงในอดีต ({tmResult.historicalBackcheck.totalCases} รอบ)
+                        </div>
+                        <div className="text-slate-700 dark:text-slate-300 tabular-nums">
+                          ถึงเป้า <strong className="text-emerald-500">{tmResult.historicalBackcheck.hitTarget}</strong> ·
+                          โดนตัด <strong className="text-rose-500">{tmResult.historicalBackcheck.hitStop}</strong> ·
+                          ไม่ถึงทั้งคู่ <strong>{tmResult.historicalBackcheck.unresolved}</strong>{" "}
+                          (Win {tmResult.historicalBackcheck.winRatePct}%)
                         </div>
                       </div>
                     </div>
-                  </>
+                  </div>
                 )}
               </div>
             </div>
@@ -1087,12 +1202,12 @@ export function StockTab() {
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
-                  void loadPeers(data.symbol, peersInput);
+                  void loadPeers(data.symbol, data.market, peersInput);
                 }}
                 className="flex flex-wrap items-center gap-2"
               >
                 <label className="text-xs font-semibold text-slate-600 dark:text-slate-300">
-                  หุ้นคู่แข่งในกลุ่มเดียวกัน (คั่นด้วยลูกน้ำ ,):
+                  หุ้นคู่แข่งในกลุ่ม (เทียบข้ามตลาดได้ คั่นด้วย ,):
                 </label>
                 <input
                   type="text"
@@ -1125,7 +1240,9 @@ export function StockTab() {
                     >
                       <div className="flex justify-between font-bold text-sm">
                         <span>{r.symbol}</span>
-                        <span className="tabular-nums">{r.price ? `${r.price.toFixed(2)} บ.` : "-"}</span>
+                        <span className="tabular-nums">
+                          {r.price ? formatPrice(r.price, r.currency) : "-"}
+                        </span>
                       </div>
                       <div className="grid grid-cols-4 gap-1 mt-2 text-[11px] tabular-nums">
                         <div>P/E: {r.pe ?? "-"}</div>
@@ -1142,13 +1259,13 @@ export function StockTab() {
                     <thead>
                       <tr className="border-b border-slate-200 dark:border-slate-800 text-slate-500">
                         <th className="py-2 pr-3">หุ้น</th>
-                        <th className="py-2 px-3 text-right">ราคา (บ.)</th>
+                        <th className="py-2 px-3 text-right">ราคา</th>
                         <th className="py-2 px-3 text-right">1D %</th>
                         <th className="py-2 px-3 text-right">P/E</th>
                         <th className="py-2 px-3 text-right">P/BV</th>
                         <th className="py-2 px-3 text-right">ROE (%)</th>
                         <th className="py-2 px-3 text-right">Yield (%)</th>
-                        <th className="py-2 pl-3 text-right">Mkt Cap (พันลบ.)</th>
+                        <th className="py-2 pl-3 text-right">Mkt Cap (B)</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200/60 dark:divide-slate-800/60 tabular-nums">
@@ -1163,7 +1280,9 @@ export function StockTab() {
                           }`}
                         >
                           <td className="py-2.5 pr-3 font-bold text-sky-500">{r.symbol}</td>
-                          <td className="py-2.5 px-3 text-right">{r.price?.toFixed(2) ?? "-"}</td>
+                          <td className="py-2.5 px-3 text-right">
+                            {r.price ? formatPrice(r.price, r.currency) : "-"}
+                          </td>
                           <td
                             className={`py-2.5 px-3 text-right ${
                               (r.changePct ?? 0) >= 0 ? "text-emerald-500" : "text-rose-500"
@@ -1209,10 +1328,9 @@ export function StockTab() {
             </div>
           )}
 
-          {/* SUB-TAB 4: Sources, Broker Reports, News & Raw Fact Sheet */}
+          {/* SUB-TAB 4: Sources & Fact Sheet */}
           {stockSubTab === "sources" && (
             <div className="space-y-4">
-              {/* 1. Broker Reports */}
               <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-5 space-y-3">
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-bold">
@@ -1224,21 +1342,21 @@ export function StockTab() {
                     rel="noopener noreferrer"
                     className="text-xs text-sky-500 hover:underline inline-flex items-center gap-1"
                   >
-                    เปิด Settrade IAA ต้นฉบับ <ExternalLink className="h-3.5 w-3.5" />
+                    เปิดหน้า Consensus ต้นฉบับ <ExternalLink className="h-3.5 w-3.5" />
                   </a>
                 </div>
                 {data.brokerReports.length === 0 ? (
                   <p className="text-xs text-slate-500">
-                    ไม่พบบทวิเคราะห์รายโบรกเกอร์ใหม่ในฟีดข่าว 14 วันล่าสุด (ตรวจสอบเป้า Consensus รวมได้จากการ์ดด้านบนหรืออัปโหลดไฟล์ PDF โบรกฯ เอง)
+                    ไม่พบบทวิเคราะห์รายโบรกเกอร์ใหม่ในฟีดข่าวล่าสุด (ดูเป้า Consensus รวมจากการ์ดด้านบนหรืออัปโหลด PDF บทวิเคราะห์เพิ่มได้)
                   </p>
                 ) : (
                   <div className="overflow-x-auto">
                     <table className="w-full text-xs text-left">
                       <thead>
                         <tr className="border-b border-slate-200 dark:border-slate-800 text-slate-500">
-                          <th className="py-2 pr-3">โบรกเกอร์</th>
+                          <th className="py-2 pr-3">โบรกเกอร์ / สถาบัน</th>
                           <th className="py-2 px-3">คำแนะนำ</th>
-                          <th className="py-2 px-3 text-right">เป้า (บ.)</th>
+                          <th className="py-2 px-3 text-right">เป้า ({unit})</th>
                           <th className="py-2 px-3 text-right">Upside</th>
                           <th className="py-2 px-3">วันที่</th>
                           <th className="py-2 pl-3">พาดหัว / ต้นฉบับ</th>
@@ -1292,11 +1410,10 @@ export function StockTab() {
                 )}
               </div>
 
-              {/* 2. 30D Company News & Public Broker Web */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-5 space-y-2.5">
                   <h3 className="text-sm font-bold">
-                    2. ข่าวเฉพาะบริษัทที่คัดกรองแล้ว (รอบ 30 วัน · {data.companyNews.length})
+                    2. ข่าวเฉพาะบริษัท (รอบ 30 วัน · {data.companyNews.length})
                   </h3>
                   {data.companyNews.length === 0 ? (
                     <p className="text-xs text-slate-500">ไม่พบข่าวเฉพาะบริษัทในรอบ 30 วัน</p>
@@ -1322,7 +1439,7 @@ export function StockTab() {
 
                 <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-5 space-y-2.5">
                   <h3 className="text-sm font-bold">
-                    3. บทวิเคราะห์หน้าเว็บสาธารณะโบรกเกอร์ ({data.brokerWebResearch.length})
+                    3. บทวิเคราะห์หน้าเว็บสาธารณะ ({data.brokerWebResearch.length})
                   </h3>
                   {data.brokerWebResearch.length === 0 ? (
                     <p className="text-xs text-slate-500">ไม่พบบทวิเคราะห์สาธารณะเพิ่มเติม</p>
@@ -1347,7 +1464,6 @@ export function StockTab() {
                 </div>
               </div>
 
-              {/* Transparency Expander: 5-Rule Checklist + Raw Fact Sheet */}
               <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 overflow-hidden">
                 <button
                   type="button"
@@ -1356,7 +1472,7 @@ export function StockTab() {
                 >
                   <span className="text-xs font-bold flex items-center gap-2">
                     <ShieldCheck className="h-4 w-4 text-emerald-400" />
-                    ดูเช็กลิสต์ 5 เกณฑ์ และข้อมูลดิบ (Fact Sheet) ที่ส่งเข้า Gemini จริงเพื่อความโปร่งใส
+                    ดูเช็กลิสต์ 5 เกณฑ์ และข้อมูลดิบ (Fact Sheet) ที่ส่งเข้า Gemini จริง
                   </span>
                   {showFactSheet ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
                 </button>
@@ -1401,7 +1517,7 @@ export function StockTab() {
             </div>
           )}
 
-          {/* SUB-TAB 5: Point-in-Time Replay & Leakage Audit */}
+          {/* SUB-TAB 5: Point-in-Time Replay */}
           {stockSubTab === "replay" && (
             <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-5 space-y-4">
               <div>
@@ -1409,14 +1525,14 @@ export function StockTab() {
                   จำลองย้อนเวลาด้วยข้อมูลที่มีอยู่จริง ณ วันนั้น (Point-in-Time Replay & Zero-Future-Leakage Audit)
                 </h3>
                 <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                  ระบบจะตัดแท่งเทียนและข่าวทั้งหมดที่เกิดขึ้นหลังวันที่เลือกออก 100% เพื่อทดสอบว่า AI วิเคราะห์ได้แม่นยำจริงโดยไม่แอบเห็นอนาคต
+                  ระบบจะตัดแท่งเทียนและข่าวหลังวันที่เลือกออก 100% เพื่อทดสอบว่า AI วิเคราะห์ได้แม่นยำจริงโดยไม่แอบเห็นอนาคต
                 </p>
               </div>
 
               <div className="flex flex-wrap items-end gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">
-                    เลือกวันย้อนหลังที่ต้องการทดสอบ (As-Of Date):
+                    เลือกวันย้อนหลัง (As-Of Date):
                   </label>
                   <input
                     type="date"
@@ -1455,9 +1571,9 @@ export function StockTab() {
                 <div className="space-y-3 pt-2">
                   <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                     <div className="rounded-xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 p-3">
-                      <div className="text-[11px] text-slate-500">ราคา ณ วันทดสอบ ({replayResult.asOfDate})</div>
+                      <div className="text-[11px] text-slate-500">ราคา ณ {replayResult.asOfDate}</div>
                       <div className="text-lg font-extrabold tabular-nums mt-0.5">
-                        {replayResult.priceAtAsOf.toFixed(2)} บ.
+                        {formatPrice(replayResult.priceAtAsOf, data.currency)}
                       </div>
                     </div>
                     <div className="rounded-xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 p-3">
@@ -1470,7 +1586,7 @@ export function StockTab() {
                         }`}
                       >
                         {replayResult.actualPriceLater !== null
-                          ? `${replayResult.actualPriceLater.toFixed(2)} บ. (${(replayResult.actualReturnPct ?? 0) >= 0 ? "+" : ""}${replayResult.actualReturnPct?.toFixed(2)}%)`
+                          ? `${formatPrice(replayResult.actualPriceLater, data.currency)} (${(replayResult.actualReturnPct ?? 0) >= 0 ? "+" : ""}${replayResult.actualReturnPct?.toFixed(2)}%)`
                           : "-"}
                       </div>
                     </div>

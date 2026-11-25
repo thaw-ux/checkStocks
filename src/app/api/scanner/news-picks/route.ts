@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getOrFetch } from "@/lib/cache";
 import { fetchAllCategorizedNews, fetchDailyBrokerResearchFeeds } from "@/lib/data/news";
-import { getStockMeta } from "@/lib/set50";
+import { parseMarketId, resolveStockSymbol } from "@/lib/markets";
 import type { NewsPickItem } from "@/lib/types";
 
 export async function GET(request: Request) {
@@ -9,14 +9,15 @@ export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const forceRefresh = searchParams.get("refresh") === "1";
+    const market = parseMarketId(searchParams.get("market"), "NASDAQ100");
 
     const data = await getOrFetch(
-      "api:scanner:news-picks",
+      `api:scanner:news-picks:global:v2:${market}`,
       12 * 60 * 1000,
       async () => {
         const [catNews, brokerReports] = await Promise.all([
           fetchAllCategorizedNews(forceRefresh),
-          fetchDailyBrokerResearchFeeds(undefined, forceRefresh),
+          fetchDailyBrokerResearchFeeds(undefined, forceRefresh, market),
         ]);
 
         const map = new Map<
@@ -47,9 +48,15 @@ export async function GET(request: Request) {
           if (!cur.headlines.some((h) => h.title === title)) {
             cur.headlines.push({ title, link, source, pubDate });
           }
-          if (sentimentHint === "positive" || /ซื้อ|เชียร์|เด่น|พุ่ง|นิวไฮ|Outperform|โต/i.test(title)) {
+          if (
+            sentimentHint === "positive" ||
+            /ซื้อ|เชียร์|เด่น|พุ่ง|นิวไฮ|Outperform|Overweight|Buy|Upgrade|Raises|Beat|Rally/i.test(title)
+          ) {
             cur.pos++;
-          } else if (sentimentHint === "negative" || /ขาย|ร่วง|หั่น|ลดเป้า|ขาดทุน|เสี่ยง/i.test(title)) {
+          } else if (
+            sentimentHint === "negative" ||
+            /ขาย|ร่วง|หั่น|ลดเป้า|ขาดทุน|เสี่ยง|Sell|Downgrade|Cuts|Underperform|Miss/i.test(title)
+          ) {
             cur.neg++;
           }
           map.set(symbol, cur);
@@ -70,33 +77,49 @@ export async function GET(request: Request) {
           );
         }
 
-        const rawHeadlines: { title: string; link: string; source: string; pubDate: string; tickers: string[] }[] = [];
+        const rawHeadlines: {
+          title: string;
+          link: string;
+          source: string;
+          pubDate: string;
+          tickers: string[];
+        }[] = [];
+
+        // Also enrich from Global Categorized News matching this market
         for (const list of Object.values(catNews)) {
           for (const item of list) {
-            if (item.tickers && item.tickers.length > 0) {
-              rawHeadlines.push({
-                title: item.title,
-                link: item.link,
-                source: item.source,
-                pubDate: item.pubDate.slice(0, 10),
-                tickers: item.tickers,
-              });
-              for (const sym of item.tickers) {
-                pushMention(sym, item.source, item.title, item.link, item.pubDate.slice(0, 10));
+            if (!item.tickers || item.tickers.length === 0) continue;
+            const matching = item.tickers.filter((sym) => {
+              const meta = resolveStockSymbol(sym);
+              if (market === "SP500" || market === "NASDAQ100") {
+                return meta.market === "SP500" || meta.market === "NASDAQ100";
               }
+              return meta.market === market;
+            });
+            if (matching.length === 0) continue;
+            rawHeadlines.push({
+              title: item.title,
+              link: item.link,
+              source: item.source,
+              pubDate: item.pubDate.slice(0, 10),
+              tickers: matching,
+            });
+            for (const sym of matching) {
+              pushMention(sym, item.source, item.title, item.link, item.pubDate.slice(0, 10));
             }
           }
         }
 
         const picks: NewsPickItem[] = Array.from(map.entries())
           .map(([symbol, info]) => {
-            const meta = getStockMeta(symbol);
+            const meta = resolveStockSymbol(symbol, market);
             const sentiment: NewsPickItem["sentiment"] =
               info.pos > info.neg ? "positive" : info.neg > info.pos ? "negative" : "neutral";
             return {
               rank: 0,
-              symbol,
-              companyName: meta.nameTh,
+              symbol: meta.symbol,
+              market: meta.market,
+              companyName: meta.name,
               sector: meta.sector,
               mentionCount: info.headlines.length,
               sources: Array.from(info.sources).slice(0, 6),
@@ -109,6 +132,7 @@ export async function GET(request: Request) {
           .map((item, idx) => ({ ...item, rank: idx + 1 }));
 
         return {
+          market,
           picks,
           rawHeadlines: rawHeadlines.slice(0, 40),
           updatedAt: new Date().toISOString(),

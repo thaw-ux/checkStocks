@@ -1,6 +1,7 @@
 import { getOrFetch } from "../cache";
-import { toYahooSymbol } from "../set50";
-import type { GlobalMacroItem, OhlcvBar } from "../types";
+import { computeTechnicalSummary } from "../quant/indicators";
+import { aggregateWeeklyBars, computeSmartSupportResistance } from "../quant/supportResistance";
+import type { FxRatesToThb, GlobalMacroItem, IndexSrRadarItem, OhlcvBar } from "../types";
 
 const YF_HOSTS = [
   "https://query1.finance.yahoo.com",
@@ -64,7 +65,6 @@ interface RawYahooChartJson {
 }
 
 function formatDateYmdBkk(unixSeconds: number): string {
-  // Convert to Asia/Bangkok (UTC+7) YYYY-MM-DD
   const d = new Date((unixSeconds + 7 * 3600) * 1000);
   return d.toISOString().slice(0, 10);
 }
@@ -78,12 +78,12 @@ export async function fetchYahooChart(
   rawSymbol: string,
   range: "5d" | "1mo" | "3mo" | "6mo" | "1y" | "2y" = "1y",
   interval: "5m" | "15m" | "1d" = "1d",
-  forceRefresh = false
+  forceRefresh = false,
+  // Kept for backward compatibility; all callers pass exact Yahoo symbols now
+  _isExactYahooSymbol = true
 ): Promise<YahooChartResponse> {
-  const yahooSym = rawSymbol.includes(".") || rawSymbol.startsWith("^") || rawSymbol.includes("=") || rawSymbol.includes("-")
-    ? rawSymbol
-    : toYahooSymbol(rawSymbol);
-
+  void _isExactYahooSymbol;
+  const yahooSym = rawSymbol.trim().toUpperCase();
   const cacheKey = `yf:chart:${yahooSym}:${range}:${interval}`;
   const ttlMs = interval === "1d" ? 10 * 60 * 1000 : 3 * 60 * 1000;
 
@@ -130,7 +130,6 @@ export async function fetchYahooChart(
             const timeStr =
               interval === "1d" ? formatDateYmdBkk(ts[i]) : formatDateTimeBkk(ts[i]);
             if (seenTime.has(timeStr)) {
-              // Replace duplicate day with latest candle
               const idx = bars.findIndex((b) => b.time === timeStr);
               if (idx >= 0) {
                 bars[idx] = {
@@ -162,14 +161,15 @@ export async function fetchYahooChart(
           const prevBar = bars[bars.length - 2] ?? lastBar;
           const meta: YahooChartMeta = {
             symbol: m?.symbol ?? yahooSym,
-            currency: m?.currency ?? "THB",
+            currency: m?.currency ?? "USD",
             regularMarketPrice: m?.regularMarketPrice ?? lastBar?.close ?? 0,
             chartPreviousClose: m?.chartPreviousClose ?? prevBar?.close ?? 0,
             previousClose: m?.previousClose ?? prevBar?.close ?? m?.chartPreviousClose ?? 0,
             fiftyTwoWeekHigh: m?.fiftyTwoWeekHigh ?? null,
             fiftyTwoWeekLow: m?.fiftyTwoWeekLow ?? null,
             regularMarketVolume: m?.regularMarketVolume ?? lastBar?.volume ?? null,
-            regularMarketTime: m?.regularMarketTime ?? lastBar?.timestamp ?? Math.floor(Date.now() / 1000),
+            regularMarketTime:
+              m?.regularMarketTime ?? lastBar?.timestamp ?? Math.floor(Date.now() / 1000),
             longName: m?.longName,
             shortName: m?.shortName,
           };
@@ -189,7 +189,8 @@ export async function fetchYahooBatchCharts(
   symbols: string[],
   range: "6mo" | "1y" = "1y",
   concurrency = 10,
-  forceRefresh = false
+  forceRefresh = false,
+  exactYahooSymbols = true
 ): Promise<Map<string, YahooChartResponse>> {
   const results = new Map<string, YahooChartResponse>();
   let cursor = 0;
@@ -198,7 +199,7 @@ export async function fetchYahooBatchCharts(
     while (cursor < symbols.length) {
       const idx = cursor++;
       const sym = symbols[idx];
-      const data = await fetchYahooChart(sym, range, "1d", forceRefresh);
+      const data = await fetchYahooChart(sym, range, "1d", forceRefresh, exactYahooSymbols);
       results.set(sym, data);
     }
   }
@@ -211,34 +212,35 @@ export async function fetchYahooBatchCharts(
   return results;
 }
 
+/** 12 Global Market & FX KPI Cards (US, HK, China, VIX, Gold, Oil, 10Y Yield, USD/THB, HKD/THB) */
 const MACRO_DEFINITIONS: {
   symbol: string;
   labelTh: string;
   category: GlobalMacroItem["category"];
   unit?: string;
 }[] = [
-  { symbol: "^SET.BK", labelTh: "SET Index (หุ้นไทย)", category: "thai", unit: "จุด" },
-  { symbol: "^GSPC", labelTh: "S&P 500 (สหรัฐฯ)", category: "us" },
-  { symbol: "^IXIC", labelTh: "Nasdaq (เทคฯ สหรัฐฯ)", category: "us" },
-  { symbol: "^DJI", labelTh: "Dow Jones (ดาวโจนส์)", category: "us" },
-  { symbol: "^N225", labelTh: "Nikkei 225 (ญี่ปุ่น)", category: "asia" },
-  { symbol: "^HSI", labelTh: "Hang Seng (ฮ่องกง)", category: "asia" },
+  { symbol: "^GSPC", labelTh: "🇺🇸 S&P 500 (สหรัฐฯ)", category: "us" },
+  { symbol: "^NDX", labelTh: "🇺🇸 Nasdaq 100 (เทคฯ)", category: "us" },
+  { symbol: "^DJI", labelTh: "🇺🇸 Dow Jones (ดาวโจนส์)", category: "us" },
+  { symbol: "^HSI", labelTh: "🇭🇰 Hang Seng (ฮ่องกง)", category: "hk_cn" },
+  { symbol: "000001.SS", labelTh: "🇨🇳 Shanghai Comp (จีน)", category: "hk_cn" },
+  { symbol: "399001.SZ", labelTh: "🇨🇳 Shenzhen Comp (จีน)", category: "hk_cn" },
+  { symbol: "^VIX", labelTh: "VIX ดัชนีความผันผวน", category: "volatility" },
   { symbol: "GC=F", labelTh: "ราคาทองคำโลก (Gold)", category: "commodity", unit: "USD" },
   { symbol: "BZ=F", labelTh: "น้ำมันดิบ Brent", category: "commodity", unit: "USD" },
-  { symbol: "CL=F", labelTh: "น้ำมันดิบ WTI", category: "commodity", unit: "USD" },
-  { symbol: "THB=X", labelTh: "ค่าเงินบาท (USD/THB)", category: "fx_bond", unit: "บ." },
-  { symbol: "DX-Y.NYB", labelTh: "ดัชนีดอลลาร์ (DXY)", category: "fx_bond" },
   { symbol: "^TNX", labelTh: "บอนด์ยีลด์สหรัฐฯ 10Y", category: "fx_bond", unit: "%" },
+  { symbol: "THB=X", labelTh: "อัตราแลกเปลี่ยน USD/THB", category: "fx_bond", unit: "฿" },
+  { symbol: "HKDTHB=X", labelTh: "อัตราแลกเปลี่ยน HKD/THB", category: "fx_bond", unit: "฿" },
 ];
 
 export async function fetchGlobalMacro12(forceRefresh = false): Promise<GlobalMacroItem[]> {
   return getOrFetch(
-    "yf:macro:12",
+    "yf:macro:global:12",
     5 * 60 * 1000,
     async () => {
       const items = await Promise.all(
         MACRO_DEFINITIONS.map(async (def) => {
-          const chart = await fetchYahooChart(def.symbol, "5d", "1d", forceRefresh);
+          const chart = await fetchYahooChart(def.symbol, "5d", "1d", forceRefresh, true);
           const bars = chart.bars;
           const last = bars[bars.length - 1];
           const prev = bars[bars.length - 2];
@@ -262,6 +264,120 @@ export async function fetchGlobalMacro12(forceRefresh = false): Promise<GlobalMa
         })
       );
       return items.filter((item) => item.price > 0);
+    },
+    forceRefresh
+  );
+}
+
+/** Live FX rates to Thai Baht (THB) for multi-currency Paper Trade conversion */
+export async function fetchFxRatesToThb(forceRefresh = false): Promise<FxRatesToThb> {
+  return getOrFetch(
+    "yf:fx:to_thb",
+    10 * 60 * 1000,
+    async () => {
+      const [usdRes, hkdRes, cnyRes] = await Promise.all([
+        fetchYahooChart("THB=X", "5d", "1d", forceRefresh, true),
+        fetchYahooChart("HKDTHB=X", "5d", "1d", forceRefresh, true),
+        fetchYahooChart("CNYTHB=X", "5d", "1d", forceRefresh, true),
+      ]);
+
+      const usd = usdRes.meta?.regularMarketPrice || usdRes.bars.at(-1)?.close || 34.0;
+      const hkd = hkdRes.meta?.regularMarketPrice || hkdRes.bars.at(-1)?.close || usd / 7.8;
+      const cny = cnyRes.meta?.regularMarketPrice || cnyRes.bars.at(-1)?.close || usd / 7.2;
+
+      return {
+        USD: Number(usd.toFixed(4)),
+        HKD: Number(hkd.toFixed(4)),
+        CNY: Number(cny.toFixed(4)),
+        THB: 1,
+        updatedAt: new Date().toISOString(),
+      };
+    },
+    forceRefresh
+  );
+}
+
+/** 5 Global Index S/R Radar definitions (US + Hong Kong + Mainland China) */
+const INDEX_RADAR_DEFS: {
+  yahooSymbol: string;
+  displaySymbol: string;
+  labelTh: string;
+  flag: string;
+  market: IndexSrRadarItem["market"];
+  currency: string;
+}[] = [
+  {
+    yahooSymbol: "^GSPC",
+    displaySymbol: "^GSPC",
+    labelTh: "S&P 500 (ดัชนีหลักสหรัฐฯ)",
+    flag: "🇺🇸",
+    market: "SP500",
+    currency: "USD",
+  },
+  {
+    yahooSymbol: "^NDX",
+    displaySymbol: "^NDX",
+    labelTh: "Nasdaq 100 (เทคฯ สหรัฐฯ)",
+    flag: "🇺🇸",
+    market: "NASDAQ100",
+    currency: "USD",
+  },
+  {
+    yahooSymbol: "^DJI",
+    displaySymbol: "^DJI",
+    labelTh: "Dow Jones (อุตสาหกรรมสหรัฐฯ)",
+    flag: "🇺🇸",
+    market: "SP500",
+    currency: "USD",
+  },
+  {
+    yahooSymbol: "^HSI",
+    displaySymbol: "^HSI",
+    labelTh: "Hang Seng (ตลาดฮ่องกง HKEX)",
+    flag: "🇭🇰",
+    market: "HK",
+    currency: "HKD",
+  },
+  {
+    yahooSymbol: "000001.SS",
+    displaySymbol: "000001.SS",
+    labelTh: "Shanghai Composite (จีนแผ่นดินใหญ่)",
+    flag: "🇨🇳",
+    market: "CHINA",
+    currency: "CNY",
+  },
+];
+
+export async function fetchIndexSrRadar5(forceRefresh = false): Promise<IndexSrRadarItem[]> {
+  return getOrFetch(
+    "yf:index:sr-radar:global:5",
+    10 * 60 * 1000,
+    async () => {
+      const list = await Promise.all(
+        INDEX_RADAR_DEFS.map(async (def) => {
+          const chart = await fetchYahooChart(def.yahooSymbol, "2y", "1d", forceRefresh, true);
+          if (!chart.ok || chart.bars.length < 30) return null;
+          const tech = computeTechnicalSummary(chart.bars, def.currency);
+          const srDaily = computeSmartSupportResistance(chart.bars, def.currency, "day");
+          const weeklyBars = aggregateWeeklyBars(chart.bars);
+          const srWeekly = computeSmartSupportResistance(weeklyBars, def.currency, "week");
+          return {
+            symbol: def.yahooSymbol,
+            displaySymbol: def.displaySymbol,
+            labelTh: def.labelTh,
+            flag: def.flag,
+            market: def.market,
+            price: tech.price,
+            changePct: tech.changePct,
+            trendLabel: tech.trendLabel,
+            trendBias: tech.trendBias,
+            rsi14: tech.rsi14,
+            srDaily,
+            srWeekly,
+          } satisfies IndexSrRadarItem;
+        })
+      );
+      return list.filter((x): x is IndexSrRadarItem => x !== null);
     },
     forceRefresh
   );

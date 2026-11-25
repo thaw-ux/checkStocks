@@ -1,21 +1,23 @@
 import type {
+  CurrencyCode,
   DimensionScore,
   EmergencyAlertItem,
   IaaConsensusSummary,
+  MarketId,
   OhlcvBar,
   WeeklyBacktestPoint,
   WeeklyPortfolioPayload,
   WeeklyPortfolioPick,
 } from "../types";
-import { getStockMeta } from "../set50";
-import { calcATR, calcEMA, calcRSI, calcSMA, roundSetTick } from "./indicators";
+import { MARKET_CONFIGS, resolveStockSymbol } from "../markets";
+import { calcATR, calcEMA, calcRSI, calcSMA, roundMarketTick } from "./indicators";
 import { runTimeMachineSimulation } from "./timeMachine";
 
 export interface StockUniverseBundle {
   symbol: string;
   bars: OhlcvBar[];
   iaa?: IaaConsensusSummary | null;
-  newsSentiment?: number; // -1 to +1
+  newsSentiment?: number;
 }
 
 function clamp(val: number, min: number, max: number): number {
@@ -24,6 +26,7 @@ function clamp(val: number, min: number, max: number): number {
 
 export function scoreStock5Dimensions(params: {
   symbol: string;
+  market?: MarketId;
   bars: OhlcvBar[];
   setBars: OhlcvBar[];
   iaa?: IaaConsensusSummary | null;
@@ -39,9 +42,11 @@ export function scoreStock5Dimensions(params: {
   expectancy5dR: number;
   rationaleTh: string;
 } | null {
-  const { symbol, bars, setBars, iaa, newsSentiment = 0, simulations = 2000 } = params;
+  const { symbol, market = "NASDAQ100", bars, setBars, iaa, newsSentiment = 0, simulations = 2000 } = params;
   if (bars.length < 40) return null;
 
+  const meta = resolveStockSymbol(symbol, market);
+  const cur = meta.currency;
   const n = bars.length;
   const closes = bars.map((b) => b.close);
   const volumes = bars.map((b) => b.volume);
@@ -56,14 +61,13 @@ export function scoreStock5Dimensions(params: {
   const volMa20 = calcSMA(volumes, 20)[n - 1] ?? last.volume;
   const volRatio = volMa20 > 0 ? last.volume / volMa20 : 1;
 
-  // 1. Fundamental & IAA Consensus (0-20)
+  // 1. Fundamental & Analyst Consensus (0-20)
   let dim1 = 10;
   if (iaa && iaa.upsidePct !== null) {
-    const upsidePts = clamp((iaa.upsidePct + 5) / 2.5, 0, 12); // +25% upside => 12 pts
+    const upsidePts = clamp((iaa.upsidePct + 5) / 2.5, 0, 12);
     const buyRatioPts = iaa.buyRatioPct !== null ? clamp((iaa.buyRatioPct / 100) * 8, 0, 8) : 4;
     dim1 = Number((upsidePts + buyRatioPts).toFixed(1));
   } else {
-    // Fallback relative 60-day valuation position when IAA unavailable
     const high60 = Math.max(...bars.slice(-60).map((b) => b.high));
     const drawdownFromHigh = high60 > 0 ? ((high60 - price) / high60) * 100 : 0;
     dim1 = Number(clamp(12 - Math.abs(drawdownFromHigh - 10) * 0.3, 6, 15).toFixed(1));
@@ -77,7 +81,7 @@ export function scoreStock5Dimensions(params: {
   if (ema20 > ema50) dim2 += 4;
   dim2 = Number(clamp(dim2, 0, 20).toFixed(1));
 
-  // 3. Momentum, Volume & Relative Strength vs SET (0-20)
+  // 3. Momentum, Volume & Relative Strength vs Benchmark (0-20)
   const stockRet10 = n > 10 ? ((price - closes[n - 11]) / closes[n - 11]) * 100 : 0;
   const setN = setBars.length;
   const setRet10 =
@@ -88,18 +92,21 @@ export function scoreStock5Dimensions(params: {
   if (rsi14 >= 50 && rsi14 <= 68) rsiPts = 8;
   else if (rsi14 >= 42 && rsi14 < 50) rsiPts = 6;
   else if (rsi14 > 68 && rsi14 <= 76) rsiPts = 4;
-  else if (rsi14 < 36) rsiPts = 6; // oversold bounce potential
+  else if (rsi14 < 36) rsiPts = 6;
   else rsiPts = 2;
 
   const volPts = clamp(volRatio * 4, 2, 6);
   const rsPts = clamp(3 + relStrength * 0.6, 0, 6);
   const dim3 = Number(clamp(rsiPts + volPts + rsPts, 0, 20).toFixed(1));
 
-  // Build disciplined 5-day swing plan
-  const entry = roundSetTick(price);
-  const stop = roundSetTick(Math.max(price * 0.94, price - Math.max(atr14 * 1.4, price * 0.025)));
+  // Disciplined 5-day swing plan
+  const entry = roundMarketTick(price, cur);
+  const stop = roundMarketTick(
+    Math.max(price * 0.935, price - Math.max(atr14 * 1.4, price * 0.025)),
+    cur
+  );
   const risk = Math.max(0.02, entry - stop);
-  const target = roundSetTick(entry + risk * 1.85);
+  const target = roundMarketTick(entry + risk * 1.85, cur);
   const rrRatio = Number(((target - entry) / risk).toFixed(2));
 
   // 4. Time Machine 5-Day Edge (0-20)
@@ -118,8 +125,11 @@ export function scoreStock5Dimensions(params: {
 
   // 5. Risk Stability & Sentiment (0-20)
   const atrPct = price > 0 ? (atr14 / price) * 100 : 2;
-  // Ideal SET50 swing ATR% is 1.0% - 3.2%
-  const volStability = atrPct <= 3.2 ? clamp(14 - Math.abs(atrPct - 1.8) * 2.5, 8, 14) : clamp(14 - (atrPct - 3.2) * 3, 2, 10);
+  const idealMaxAtr = market === "DR" ? 3.6 : 4.4;
+  const volStability =
+    atrPct <= idealMaxAtr
+      ? clamp(14 - Math.abs(atrPct - 2.0) * 2.2, 8, 14)
+      : clamp(14 - (atrPct - idealMaxAtr) * 2.5, 2, 10);
   const overboughtPenalty = rsi14 > 78 ? -4 : 0;
   const sentPts = clamp(3 + newsSentiment * 3, 0, 6);
   const dim5 = Number(clamp(volStability + sentPts + overboughtPenalty, 0, 20).toFixed(1));
@@ -128,8 +138,8 @@ export function scoreStock5Dimensions(params: {
 
   const reasons: string[] = [];
   if (price > ema200) reasons.push("ยืนเหนือ EMA200");
-  if (iaa?.upsidePct && iaa.upsidePct > 8) reasons.push(`Upside IAA +${iaa.upsidePct.toFixed(1)}%`);
-  if (relStrength > 1.5) reasons.push(`แกร่งกว่า SET +${relStrength.toFixed(1)}%`);
+  if (iaa?.upsidePct && iaa.upsidePct > 8) reasons.push(`Upside เป้าเฉลี่ย +${iaa.upsidePct.toFixed(1)}%`);
+  if (relStrength > 1.5) reasons.push(`แกร่งกว่าดัชนี +${relStrength.toFixed(1)}%`);
   if (tm.expectancyR > 0) reasons.push(`Time Machine 5D +${tm.expectancyR.toFixed(2)}R`);
   if (reasons.length === 0) reasons.push(`คะแนนรวม 5 มิติ ${total}/100 สมดุลความเสี่ยงดี`);
 
@@ -154,7 +164,7 @@ export function scoreStock5Dimensions(params: {
 
 function getIsoWeekMonday(dateStr: string): string {
   const d = new Date(`${dateStr}T00:00:00Z`);
-  const day = d.getUTCDay(); // 0=Sun, 1=Mon...
+  const day = d.getUTCDay();
   const diff = day === 0 ? -6 : 1 - day;
   d.setUTCDate(d.getUTCDate() + diff);
   return d.toISOString().slice(0, 10);
@@ -163,14 +173,17 @@ function getIsoWeekMonday(dateStr: string): string {
 export function buildWeeklyPortfolio360(params: {
   universe: StockUniverseBundle[];
   setBars: OhlcvBar[];
+  market?: MarketId;
   baseCapital?: number;
 }): WeeklyPortfolioPayload {
-  const { universe, setBars, baseCapital = 100_000 } = params;
+  const { universe, setBars, market = "NASDAQ100" } = params;
+  const mCfg = MARKET_CONFIGS[market];
+  const baseCapital = params.baseCapital ?? mCfg.defaultCapital;
+  const portfolioCurrency: CurrencyCode = mCfg.defaultCurrency;
+
   const latestSetDate = setBars[setBars.length - 1]?.time ?? new Date().toISOString().slice(0, 10);
   const currentMonday = getIsoWeekMonday(latestSetDate);
 
-  // Score universe using bars STRICTLY BEFORE current Monday for zero look-ahead lock
-  // (If Monday is the very first trading day with no bars before it, fall back to latest bars)
   const scored: {
     symbol: string;
     bars: OhlcvBar[];
@@ -189,10 +202,12 @@ export function buildWeeklyPortfolio360(params: {
 
     const evalResult = scoreStock5Dimensions({
       symbol: item.symbol,
+      market,
       bars: evalBars,
-      setBars: setBars.filter((b) => b.time < currentMonday).length >= 20
-        ? setBars.filter((b) => b.time < currentMonday)
-        : setBars,
+      setBars:
+        setBars.filter((b) => b.time < currentMonday).length >= 20
+          ? setBars.filter((b) => b.time < currentMonday)
+          : setBars,
       iaa: item.iaa,
       newsSentiment: item.newsSentiment,
       simulations: 1500,
@@ -218,11 +233,10 @@ export function buildWeeklyPortfolio360(params: {
 
   scored.sort((a, b) => b.evalResult.scores.total - a.evalResult.scores.total);
 
-  // Pick Top 5 with max 2 stocks per sector for healthy diversification
   const top5: typeof scored = [];
   const sectorCounts = new Map<string, number>();
   for (const cand of scored) {
-    const meta = getStockMeta(cand.symbol);
+    const meta = resolveStockSymbol(cand.symbol, market);
     const count = sectorCounts.get(meta.sector) ?? 0;
     if (count >= 2 && scored.length >= 10) continue;
     top5.push(cand);
@@ -234,15 +248,17 @@ export function buildWeeklyPortfolio360(params: {
   const emergencyAlerts: EmergencyAlertItem[] = [];
 
   const picks: WeeklyPortfolioPick[] = top5.map((item, idx) => {
-    const meta = getStockMeta(item.symbol);
-    const entry = roundSetTick(item.anchorPrice);
+    const meta = resolveStockSymbol(item.symbol, market);
+    const entry = roundMarketTick(item.anchorPrice, meta.currency);
     const atr = calcATR(item.bars.slice(-30), 14).at(-1) ?? entry * 0.02;
-    const stopLoss = roundSetTick(Math.max(entry * 0.94, entry - Math.max(atr * 1.4, entry * 0.025)));
+    const stopLoss = roundMarketTick(
+      Math.max(entry * 0.935, entry - Math.max(atr * 1.4, entry * 0.025)),
+      meta.currency
+    );
     const risk = Math.max(0.02, entry - stopLoss);
-    const targetPrice = roundSetTick(entry + risk * 1.85);
+    const targetPrice = roundMarketTick(entry + risk * 1.85, meta.currency);
     const rrRatio = Number(((targetPrice - entry) / risk).toFixed(2));
 
-    // Re-run full 10,000-sim Time Machine for each of the Top 5 picks
     const tmFull = runTimeMachineSimulation({
       symbol: item.symbol,
       bars: item.bars.slice(-260),
@@ -253,7 +269,9 @@ export function buildWeeklyPortfolio360(params: {
       simulations: 10_000,
     });
 
-    const sharesBoardLot = Math.max(100, Math.floor(perStockAlloc / entry / 100) * 100);
+    const step = meta.lotSize;
+    const sharesBoardLot =
+      entry > 0 ? Math.max(step, Math.floor(perStockAlloc / entry / step) * step) : step;
     const allocatedBaht = Number((sharesBoardLot * entry).toFixed(0));
     const pnlPct = entry > 0 ? Number((((item.currentPrice - entry) / entry) * 100).toFixed(2)) : 0;
     const pnlBaht = Number(((item.currentPrice - entry) * sharesBoardLot).toFixed(0));
@@ -266,23 +284,24 @@ export function buildWeeklyPortfolio360(params: {
       emergencyAlerts.push({
         symbol: item.symbol,
         severity: "critical",
-        title: `${item.symbol} หลุดจุดตัดขาดทุน (${stopLoss.toFixed(2)} บ.)`,
-        actionTh: `ราคาปัจจุบัน ${item.currentPrice.toFixed(2)} บ. (${pnlPct}%) แนะนำทำตามวินัยตัดขาดทุนหรือลดน้ำหนักทันที`,
+        title: `${item.symbol} หลุดจุดตัดขาดทุน (${stopLoss.toFixed(2)})`,
+        actionTh: `ราคาปัจจุบัน ${item.currentPrice.toFixed(2)} (${pnlPct}%) แนะนำทำตามวินัยตัดขาดทุนหรือลดน้ำหนักทันที`,
       });
-    } else if (pnlPct <= -3.0) {
+    } else if (pnlPct <= -3.5) {
       status = "alert";
       emergencyAlerts.push({
         symbol: item.symbol,
         severity: "warning",
-        title: `${item.symbol} แกว่งลงแรงกว่า -3% ระหว่างสัปดาห์`,
-        actionTh: `จับตาแนวรับ Stop Loss ที่ ${stopLoss.toFixed(2)} บ. อย่างใกล้ชิด ห้ามถัวเฉลี่ยขาลง`,
+        title: `${item.symbol} แกว่งลงแรงกว่า -3.5% ระหว่างสัปดาห์`,
+        actionTh: `จับตาแนวรับ Stop Loss ที่ ${stopLoss.toFixed(2)} อย่างใกล้ชิด ห้ามถัวเฉลี่ยขาลง`,
       });
     }
 
     return {
       rank: idx + 1,
-      symbol: item.symbol,
-      companyName: meta.nameTh,
+      symbol: meta.symbol,
+      currency: meta.currency,
+      companyName: meta.name,
       sector: meta.sector,
       weightPct: Number((100 / Math.max(1, top5.length)).toFixed(1)),
       allocatedBaht,
@@ -302,7 +321,6 @@ export function buildWeeklyPortfolio360(params: {
     };
   });
 
-  // Compute SET Index week return
   const setPreWeek = setBars.filter((b) => b.time < currentMonday);
   const setThisWeek = setBars.filter((b) => b.time >= currentMonday);
   const setAnchor =
@@ -315,25 +333,26 @@ export function buildWeeklyPortfolio360(params: {
 
   if (setWeekReturnPct <= -2.5) {
     emergencyAlerts.unshift({
-      symbol: "SET",
+      symbol: mCfg.benchmarkLabel,
       severity: "critical",
-      title: `ตลาดรวม SET Index ปรับลงแรง ${setWeekReturnPct.toFixed(2)}% ในสัปดาห์นี้`,
+      title: `ดัชนี ${mCfg.benchmarkLabel} ปรับลงแรง ${setWeekReturnPct.toFixed(2)}% ในสัปดาห์นี้`,
       actionTh: "ภาวะตลาด Risk-Off ควรลดขนาดพอร์ตถือเงินสดเพิ่ม 30–50% และเลื่อน Stop Loss มาคุมความเสี่ยง",
     });
   }
 
-  const totalAllocated = picks.reduce((acc, p) => acc + p.allocatedBaht, 0);
-  const totalPnlBaht = picks.reduce((acc, p) => acc + p.pnlBaht, 0);
+  // Equal-weight average return across Top 5 (clean even when CHINA mixes HKD/USD/CNY)
   const totalPnlPct =
-    totalAllocated > 0 ? Number(((totalPnlBaht / totalAllocated) * 100).toFixed(2)) : 0;
+    picks.length > 0
+      ? Number((picks.reduce((acc, p) => acc + p.pnlPct, 0) / picks.length).toFixed(2))
+      : 0;
+  const totalPnlBaht = Number(((baseCapital * totalPnlPct) / 100).toFixed(0));
   const alphaPct = Number((totalPnlPct - setWeekReturnPct).toFixed(2));
 
-  // Build deterministic 12-week historical backtest vs SET Index
   const backtest12W = compute12WeekBacktest(universe, setBars);
 
   const set50RankingPreview = scored.slice(0, 15).map((s) => ({
     symbol: s.symbol,
-    sector: getStockMeta(s.symbol).sector,
+    sector: resolveStockSymbol(s.symbol, market).sector,
     totalScore: s.evalResult.scores.total,
     scores: s.evalResult.scores,
     price: s.currentPrice,
@@ -341,6 +360,9 @@ export function buildWeeklyPortfolio360(params: {
   }));
 
   return {
+    market,
+    currency: portfolioCurrency,
+    benchmarkLabel: mCfg.benchmarkLabel,
     weekLabel: `สัปดาห์เริ่ม ${currentMonday}`,
     mondayDate: currentMonday,
     asOfDate: latestSetDate,
@@ -363,7 +385,6 @@ function compute12WeekBacktest(
 ): WeeklyBacktestPoint[] {
   if (setBars.length < 70 || universe.length < 5) return [];
 
-  // Group SET dates by ISO week Monday
   const weekBuckets = new Map<string, OhlcvBar[]>();
   for (const b of setBars) {
     const mon = getIsoWeekMonday(b.time);
@@ -373,11 +394,9 @@ function compute12WeekBacktest(
   }
 
   const sortedMondays = Array.from(weekBuckets.keys()).sort();
-  // Take up to 12 completed weeks prior to the current active week
   const candidateWeeks = sortedMondays.slice(-13, -1);
   if (candidateWeeks.length === 0) return [];
 
-  // Pre-index each stock's bars by date for O(1) lookup
   const stockBarMaps = universe.map((u) => {
     const byDate = new Map<string, number>();
     u.bars.forEach((b, idx) => byDate.set(b.time, idx));
@@ -397,7 +416,6 @@ function compute12WeekBacktest(
     const setClose = setWeek[setWeek.length - 1].close;
     const setRet = setOpen > 0 ? (setClose - setOpen) / setOpen : 0;
 
-    // Fast 5-dimension deterministic ranking strictly prior to `startDate`
     const candidates: { symbol: string; score: number; weekRet: number }[] = [];
     for (const s of stockBarMaps) {
       const startIdx = s.byDate.get(startDate);
@@ -412,7 +430,10 @@ function compute12WeekBacktest(
       const rsi = calcRSI(histCloses, 14).at(-1) ?? 50;
       const avgVol = histVols.reduce((a, b) => a + b, 0) / Math.max(1, histVols.length);
       const volRatio = avgVol > 0 ? histVols[histVols.length - 1] / avgVol : 1;
-      const mom10 = histCloses.length > 10 ? (lastC - histCloses[histCloses.length - 11]) / histCloses[histCloses.length - 11] : 0;
+      const mom10 =
+        histCloses.length > 10
+          ? (lastC - histCloses[histCloses.length - 11]) / histCloses[histCloses.length - 11]
+          : 0;
 
       let score = 0;
       if (lastC > ema50) score += 25;
@@ -424,7 +445,6 @@ function compute12WeekBacktest(
       if (s.iaa?.upsidePct) score += clamp(s.iaa.upsidePct * 0.5, -5, 15);
 
       const entryOpen = s.bars[startIdx].open || s.bars[startIdx].close;
-      // Simulate stop-loss (-4.5%) & take-profit (+8.5%) discipline across Mon–Fri
       const sl = entryOpen * 0.955;
       const tp = entryOpen * 1.085;
       let exitPrice = s.bars[endIdx].close;
@@ -487,7 +507,6 @@ export function runSandboxBacktest(params: {
     return { symbol: h.symbol, weight: h.weightPct / totalWeight, map: m };
   });
 
-  // Anchor base prices on first available date
   const setBase = slicedSet[0].close;
   const stockBases = maps.map((item) => {
     for (const d of dates) {

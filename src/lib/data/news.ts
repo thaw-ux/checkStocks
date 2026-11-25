@@ -1,7 +1,7 @@
 import * as cheerio from "cheerio";
 import { getOrFetch } from "../cache";
-import { extractThaiTickersFromText, getStockMeta } from "../set50";
-import type { BrokerReportItem, NewsItem } from "../types";
+import { extractGlobalTickersFromText, resolveStockSymbol } from "../markets";
+import type { BrokerReportItem, MarketId, NewsItem } from "../types";
 
 const HEADERS = {
   "User-Agent":
@@ -43,7 +43,6 @@ function parseRssXml(xml: string, fallbackSource: string, category: string, limi
     if (!title || !link) continue;
 
     let source = decodeXmlEntities(sourceRaw) || fallbackSource;
-    // Google News titles often end with " - SourceName"
     let cleanTitle = title;
     if (!sourceRaw && title.includes(" - ")) {
       const idx = title.lastIndexOf(" - ");
@@ -59,7 +58,9 @@ function parseRssXml(xml: string, fallbackSource: string, category: string, limi
       : parsedDate.toISOString();
 
     const snippet = decodeXmlEntities(descRaw).slice(0, 220);
-    const tickers = extractThaiTickersFromText(`${cleanTitle} ${snippet}`);
+    const tickers = extractGlobalTickersFromText(`${cleanTitle} ${snippet}`)
+      .filter((t) => !t.symbol.startsWith("^"))
+      .map((t) => t.symbol);
 
     items.push({
       id: `${category}-${i}-${Buffer.from(link.slice(0, 48)).toString("base64").slice(0, 12)}`,
@@ -97,87 +98,114 @@ async function fetchRss(
   }
 }
 
-function gnewsUrl(query: string): string {
-  return `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=th&gl=TH&ceid=TH:th`;
+function gnewsUrl(query: string, lang: "th" | "en" = "en"): string {
+  if (lang === "th") {
+    return `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=th&gl=TH&ceid=TH:th`;
+  }
+  return `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`;
 }
 
+/** 7 Global Financial News Categories (100% International: US, Hong Kong, China, Macro & Commodities) */
 export const NEWS_CATEGORIES: {
   key: string;
   label: string;
   feeds: { url: string; source: string; limit?: number }[];
 }[] = [
   {
-    key: "broker_picks",
-    label: "1. บทวิเคราะห์ & โพยหุ้นเด่นเช้าโบรกเกอร์ (KS / KSS / INVX / FSSIA / DAOL / BLS)",
+    key: "wallstreet_calls",
+    label: "1. โพย Wall Street & ปรับราคาเป้าหมาย (Goldman / MS / JPM / Citi / Nomura)",
     feeds: [
       {
-        url: gnewsUrl('("บล." OR โบรกเกอร์) ("แนะซื้อ" OR "หุ้นเด่น" OR "ราคาเป้าหมาย" OR "Top Pick") หุ้นไทย when:5d'),
-        source: "โพยโบรกเกอร์",
+        url: gnewsUrl(
+          '("price target" OR "upgrade" OR "Overweight" OR "Outperform") ("Goldman Sachs" OR "Morgan Stanley" OR "JPMorgan" OR "UBS" OR "Citi" OR "Nomura") stock when:5d',
+          "en"
+        ),
+        source: "Wall Street Calls",
         limit: 12,
       },
     ],
   },
   {
-    key: "thai_stock_media",
-    label: "2. ข่าวหุ้นสายโพยโบรก (มิติหุ้น · ข่าวหุ้น · ทันหุ้น · HoonSmart · efin)",
-    feeds: [
-      { url: "https://www.kaohoon.com/feed", source: "ข่าวหุ้นธุรกิจ", limit: 6 },
-      { url: "https://hoonsmart.com/feed", source: "HoonSmart", limit: 6 },
-      { url: "https://www.mitihoon.com/feed", source: "มิติหุ้น", limit: 6 },
-    ],
-  },
-  {
-    key: "trade_mainstream",
-    label: "3. ดีลการค้าโลก ภาษีนำเข้า & สื่อหลักไทย (ประชาชาติ / กรุงเทพธุรกิจ / MGR)",
+    key: "us_tech_ai",
+    label: "2. หุ้นสหรัฐฯ S&P 500 · Nasdaq 100 · เทคฯ & AI Earnings",
     feeds: [
       {
-        url: gnewsUrl('(ภาษีนำเข้า OR ส่งออกไทย OR สงครามการค้า) (ประชาชาติธุรกิจ OR กรุงเทพธุรกิจ OR ผู้จัดการ) when:7d'),
-        source: "สื่อธุรกิจไทย",
-        limit: 8,
+        url: gnewsUrl(
+          '("S&P 500" OR "Nasdaq 100" OR "Nvidia" OR "Apple" OR "Microsoft" OR "Tesla" OR "Meta" OR "Amazon") stock market earnings when:4d',
+          "en"
+        ),
+        source: "US Equities",
+        limit: 12,
       },
     ],
   },
   {
-    key: "politics_policy",
-    label: "4. ข่าวการเมือง & นโยบายภาครัฐ",
+    key: "us_fed_macro",
+    label: "3. นโยบาย Fed · เงินเฟ้อสหรัฐฯ · เศรษฐกิจอเมริกา & บอนด์ยีลด์ 10Y",
     feeds: [
       {
-        url: gnewsUrl('(ครม. OR รัฐบาล OR มาตรการกระตุ้นเศรษฐกิจ OR กระทรวงการคลัง) หุ้น OR เศรษฐกิจ when:7d'),
-        source: "นโยบายรัฐ",
-        limit: 7,
+        url: gnewsUrl(
+          '("Federal Reserve" OR "Powell" OR "US CPI" OR "Treasury yield" OR "US jobs") market stocks when:5d',
+          "en"
+        ),
+        source: "US Macro & Fed",
+        limit: 10,
       },
     ],
   },
   {
-    key: "thai_macro",
-    label: "5. ข่าวเศรษฐกิจไทย การค้า & การเงิน (กนง. / ธปท. / GDP)",
+    key: "hk_equities",
+    label: "4. ตลาดหุ้นฮ่องกง (HKEX / Hang Seng) · เทคฯ & EV (Tencent / Alibaba / BYD / Xiaomi)",
     feeds: [
       {
-        url: gnewsUrl('(กนง. OR ธปท. OR ดอกเบี้ยนโยบาย OR เงินเฟ้อไทย OR ค่าเงินบาท) when:7d'),
-        source: "เศรษฐกิจไทย",
-        limit: 7,
+        url: gnewsUrl(
+          '("Hang Seng" OR "HKEX" OR "Tencent" OR "Alibaba" OR "BYD" OR "Xiaomi" OR "Meituan" OR "HSBC") Hong Kong stock when:6d',
+          "en"
+        ),
+        source: "Hong Kong HKEX",
+        limit: 12,
       },
     ],
   },
   {
-    key: "global_macro",
-    label: "6. ข่าวตลาดโลก เฟด ทองคำ & น้ำมัน",
+    key: "china_macro_stocks",
+    label: "5. เศรษฐกิจจีน · PBOC · มาตรการกระตุ้น & หุ้นจีน A-Share / US ADR",
     feeds: [
       {
-        url: gnewsUrl('(เฟด OR ดอกเบี้ยสหรัฐ OR ราคาทองคำ OR ราคาน้ำมันดิบ OR ตลาดหุ้นสหรัฐ) when:5d'),
-        source: "ตลาดโลก",
-        limit: 8,
+        url: gnewsUrl(
+          '("China stocks" OR "CSI 300" OR "Shanghai Composite" OR "PBOC" OR "China stimulus" OR "PDD" OR "CATL" OR "Moutai") when:6d',
+          "en"
+        ),
+        source: "China A-Share & ADR",
+        limit: 12,
       },
     ],
   },
   {
-    key: "tourism_consumer",
-    label: "7. ข่าวสังคม ท่องเที่ยว เกษตร & กำลังซื้อ",
+    key: "global_trade",
+    label: "6. สงครามการค้า · ภาษีนำเข้าสหรัฐฯ-จีน & ภูมิรัฐศาสตร์โลก",
     feeds: [
       {
-        url: gnewsUrl('(นักท่องเที่ยวต่างชาติ OR ท่องเที่ยวไทย OR กำลังซื้อ OR ค้าปลีกไทย) when:7d'),
-        source: "ท่องเที่ยว/บริโภค",
-        limit: 7,
+        url: gnewsUrl(
+          '("US China" OR "tariffs" OR "semiconductor export" OR "trade war") stocks market when:6d',
+          "en"
+        ),
+        source: "Global Trade",
+        limit: 10,
+      },
+    ],
+  },
+  {
+    key: "commodities_fx",
+    label: "7. ทองคำโลก · น้ำมันดิบ · ดอลลาร์ & อัตราแลกเปลี่ยน USD/THB",
+    feeds: [
+      {
+        url: gnewsUrl(
+          '("gold price" OR "Brent crude" OR "oil price" OR "US dollar" OR "Thai baht") market when:5d',
+          "en"
+        ),
+        source: "Commodities & FX",
+        limit: 10,
       },
     ],
   },
@@ -187,17 +215,16 @@ export async function fetchAllCategorizedNews(
   forceRefresh = false
 ): Promise<Record<string, NewsItem[]>> {
   return getOrFetch(
-    "news:categorized:all",
+    "news:categorized:global:v2",
     12 * 60 * 1000,
     async () => {
       const result: Record<string, NewsItem[]> = {};
       await Promise.all(
         NEWS_CATEGORIES.map(async (cat) => {
           const arrays = await Promise.all(
-            cat.feeds.map((f) => fetchRss(f.url, f.source, cat.label, f.limit ?? 8))
+            cat.feeds.map((f) => fetchRss(f.url, f.source, cat.label, f.limit ?? 10))
           );
           const merged = arrays.flat();
-          // Deduplicate by title prefix
           const seen = new Set<string>();
           const unique = merged.filter((item) => {
             const key = item.title.slice(0, 48).toLowerCase();
@@ -206,7 +233,7 @@ export async function fetchAllCategorizedNews(
             return true;
           });
           unique.sort((a, b) => new Date(b.pubDate).getTime() - new Date(a.pubDate).getTime());
-          result[cat.label] = unique.slice(0, 14);
+          result[cat.label] = unique.slice(0, 12);
         })
       );
       return result;
@@ -217,175 +244,281 @@ export async function fetchAllCategorizedNews(
 
 export async function fetchCompanyNews30D(
   symbol: string,
-  forceRefresh = false
+  forceRefresh = false,
+  market: MarketId = "NASDAQ100"
 ): Promise<{ companyNews: NewsItem[]; brokerWebResearch: NewsItem[] }> {
-  const clean = symbol.toUpperCase();
-  const meta = getStockMeta(clean);
+  const resolved = resolveStockSymbol(symbol, market);
+  const clean = resolved.symbol;
 
   return getOrFetch(
-    `news:company:${clean}`,
+    `news:company:global:${resolved.market}:${clean}`,
     15 * 60 * 1000,
     async () => {
-      const [newsRaw, brokerRaw] = await Promise.all([
+      if (resolved.market === "DR") {
+        // Extract underlying global company name (e.g. "DR หุ้น NVIDIA (สหรัฐฯ)" -> "NVIDIA")
+        const underlying = resolved.name
+          .replace(/^DR\s*(หุ้น|กองทุนดัชนี|กองทุน)?\s*/i, "")
+          .split("(")[0]
+          .trim();
+        const [thDrNews, globalNews, analystNews] = await Promise.all([
+          fetchRss(
+            gnewsUrl(`("${clean}" OR "${underlying}") (DR OR หุ้นต่างประเทศ) when:30d`, "th"),
+            "ข่าว DR หุ้นนอก",
+            "company_news",
+            8
+          ),
+          fetchRss(
+            gnewsUrl(`"${underlying}" stock earnings outlook when:30d`, "en"),
+            "Global News",
+            "company_news",
+            8
+          ),
+          fetchRss(
+            gnewsUrl(`"${underlying}" ("price target" OR "Buy" OR "Overweight" OR "upgrade") analyst when:45d`, "en"),
+            "Wall Street Research",
+            "broker_web",
+            8
+          ),
+        ]);
+        const merged = [...thDrNews, ...globalNews].sort(
+          (a, b) => new Date(b.pubDate).getTime() - new Date(a.pubDate).getTime()
+        );
+        return {
+          companyNews: merged.slice(0, 10),
+          brokerWebResearch: analystNews.slice(0, 8),
+        };
+      }
+
+      const shortName = resolved.name
+        .split("(")[0]
+        .replace(/\b(Inc|Corp|Co|Ltd|Holdings|Group|plc|Company)\b\.?/gi, "")
+        .trim();
+      const queryTerm = shortName.length >= 3 ? `("${clean}" OR "${shortName}")` : `"${clean}"`;
+
+      const [enNews, thNews, analystNews] = await Promise.all([
         fetchRss(
-          gnewsUrl(`("${clean}" OR "${meta.nameTh}") (หุ้น OR กำไร OR งบ OR ปันผล OR เป้าหมาย) when:30d`),
-          "ข่าวบริษัท",
+          gnewsUrl(`${queryTerm} stock earnings guidance when:30d`, "en"),
+          "Global News",
           "company_news",
-          14
+          10
         ),
         fetchRss(
-          gnewsUrl(`"${clean}" ("บล." OR "ราคาเป้าหมาย" OR "โบรก" OR "Outperform" OR "แนะซื้อ") when:45d`),
-          "บทวิเคราะห์โบรกเกอร์",
+          gnewsUrl(`${queryTerm} หุ้น when:30d`, "th"),
+          "ข่าวต่างประเทศ (ไทย)",
+          "company_news",
+          4
+        ),
+        fetchRss(
+          gnewsUrl(
+            `${queryTerm} ("price target" OR "upgrade" OR "downgrade" OR "rating" OR "Buy" OR "Overweight") analyst when:45d`,
+            "en"
+          ),
+          "Wall Street Research",
           "broker_web",
           10
         ),
       ]);
 
-      // Ensure relevance by matching symbol or Thai company name
-      const nameFragment = meta.nameTh.slice(0, 8);
-      const isRelevant = (item: NewsItem) => {
-        const hay = `${item.title} ${item.snippet ?? ""}`.toUpperCase();
-        return (
-          new RegExp(`\\b${clean}\\b`).test(hay) ||
-          (nameFragment.length >= 3 && hay.includes(nameFragment.toUpperCase()))
-        );
-      };
-
+      const mergedNews = [...enNews, ...thNews].sort(
+        (a, b) => new Date(b.pubDate).getTime() - new Date(a.pubDate).getTime()
+      );
       return {
-        companyNews: newsRaw.filter(isRelevant).slice(0, 10),
-        brokerWebResearch: brokerRaw.filter(isRelevant).slice(0, 8),
+        companyNews: mergedNews.slice(0, 10),
+        brokerWebResearch: analystNews.slice(0, 8),
       };
     },
     forceRefresh
   );
 }
 
-// Thai Broker Name Matcher (20+ Thai Brokers)
-const BROKER_PATTERNS: { code: string; pattern: RegExp }[] = [
-  { code: "INVX (อินโนเวสท์ เอกซ์)", pattern: /INVX|อินโนเวสท์\s*เอกซ์|InnovestX/i },
-  { code: "KS (กสิกรไทย)", pattern: /บล\.?\s*กสิกร|\bKS\b|Kasikorn\s*Securities/i },
-  { code: "KSS (กรุงศรี)", pattern: /บล\.?\s*กรุงศรี|\bKSS\b|Krungsri\s*Securities/i },
-  { code: "FSSIA (ฟินันเซีย)", pattern: /FSSIA|ฟินันเซีย|Finansia/i },
-  { code: "BLS (บัวหลวง)", pattern: /บล\.?\s*บัวหลวง|\bBLS\b|Bualuang/i },
-  { code: "DAOLSEC (ดาโอ)", pattern: /DAOL|ดาโอ/i },
-  { code: "MST (เมย์แบงก์)", pattern: /เมย์แบงก์|Maybank|\bMST\b/i },
-  { code: "TISCO (ทิสโก้)", pattern: /บล\.?\s*ทิสโก้|TISCO\s*Sec/i },
-  { code: "YUANTA (หยวนต้า)", pattern: /หยวนต้า|Yuanta/i },
-  { code: "PI (พาย)", pattern: /บล\.?\s*พาย|Pi\s*Securities/i },
-  { code: "KGI (เคจีไอ)", pattern: /บล\.?\s*เคจีไอ|\bKGI\b/i },
-  { code: "ASPS (เอเซีย พลัส)", pattern: /เอเซีย\s*พลัส|\bASPS\b|Asia\s*Plus/i },
-  { code: "CGSI (ซีจีเอส)", pattern: /ซีจีเอส|CGSI|CGS\s*International/i },
-  { code: "TRINITY (ทรีนีตี้)", pattern: /ทรีนีตี้|Trinity/i },
-  { code: "UOBKH (ยูโอบี)", pattern: /ยูโอบี|UOBKH/i },
-  { code: "GLOBLEX (โกลเบล็ก)", pattern: /โกลเบล็ก|Globlex/i },
-  { code: "LIB (ลิเบอเรเตอร์)", pattern: /ลิเบอเรเตอร์|Liberator/i },
-  { code: "DBS (ดีบีเอส)", pattern: /ดีบีเอส|DBSV|DBS\s*Vickers/i },
-  { code: "PST (ฟิลลิป)", pattern: /ฟิลลิป|Phillip/i },
-  { code: "CNS (กรุงศรี พัฒนสิน)", pattern: /พัฒนสิน|\bCNS\b/i },
-  { code: "BYD (บียอนด์)", pattern: /บล\.?\s*บียอนด์|Beyond\s*Sec/i },
-  { code: "KTX (กรุงไทย เอ็กซ์สปริง)", pattern: /กรุงไทย\s*เอ็กซ์สปริง|\bKTX\b/i },
+const DR_ISSUER_PATTERNS: { code: string; pattern: RegExp }[] = [
+  { code: "กรุงไทย (KTB DR80)", pattern: /กรุงไทย|KTB|80\b/i },
+  { code: "บัวหลวง (BLS DR01)", pattern: /บัวหลวง|BLS|01\b/i },
+  { code: "เคจีไอ (KGI DR13)", pattern: /เคจีไอ|KGI|13\b/i },
+  { code: "หยวนต้า (Yuanta DR19)", pattern: /หยวนต้า|Yuanta|19\b/i },
+  { code: "InnovestX (INVX)", pattern: /INVX|InnovestX|อินโนเวสท์/i },
 ];
 
-export function detectBrokerName(text: string): string {
-  for (const b of BROKER_PATTERNS) {
-    if (b.pattern.test(text)) return b.code;
+export function detectRatingFromText(text: string): {
+  rating: string;
+  normalized: "Buy" | "Hold" | "Sell";
+} {
+  if (/ขาย|SELL|UNDERPERFORM|UNDERWEIGHT|DOWNGRADE|ลดน้ำหนัก/i.test(text)) {
+    return { rating: "ขาย / Underperform", normalized: "Sell" };
   }
-  return "Consensus / รวมโบรกเกอร์";
+  if (
+    /ถือ|HOLD|NEUTRAL|EQUAL.?WEIGHT/i.test(text) &&
+    !/แนะ.?ซื้อ|เชียร์ซื้อ|OUTPERFORM|OVERWEIGHT|BUY/i.test(text)
+  ) {
+    return { rating: "ถือ / Neutral", normalized: "Hold" };
+  }
+  if (/OUTPERFORM|OVERWEIGHT/i.test(text)) {
+    return { rating: "Outperform / Overweight", normalized: "Buy" };
+  }
+  if (/ซื้อ|BUY|UPGRADE|TOP\s*PICK|เชียร์|เด่น/i.test(text)) {
+    return { rating: "ซื้อ (Buy)", normalized: "Buy" };
+  }
+  return { rating: "ถือ / ติดตาม", normalized: "Hold" };
 }
 
-export function extractTargetPriceFromText(text: string, referencePrice?: number | null): number | null {
+const GLOBAL_BROKER_PATTERNS: { code: string; pattern: RegExp }[] = [
+  { code: "Goldman Sachs", pattern: /Goldman\s*Sachs/i },
+  { code: "Morgan Stanley", pattern: /Morgan\s*Stanley/i },
+  { code: "JPMorgan", pattern: /J\.?P\.?\s*Morgan|JPMorgan/i },
+  { code: "Bank of America", pattern: /Bank\s*of\s*America|BofA/i },
+  { code: "Citigroup", pattern: /Citigroup|\bCiti\b/i },
+  { code: "UBS", pattern: /\bUBS\b/i },
+  { code: "Barclays", pattern: /Barclays/i },
+  { code: "Jefferies", pattern: /Jefferies/i },
+  { code: "Wedbush", pattern: /Wedbush/i },
+  { code: "Bernstein", pattern: /Bernstein/i },
+  { code: "HSBC", pattern: /\bHSBC\b/i },
+  { code: "Wells Fargo", pattern: /Wells\s*Fargo/i },
+  { code: "Mizuho", pattern: /Mizuho/i },
+  { code: "Evercore ISI", pattern: /Evercore/i },
+  { code: "TD Cowen", pattern: /TD\s*Cowen|Cowen/i },
+  { code: "Piper Sandler", pattern: /Piper\s*Sandler/i },
+  { code: "Nomura", pattern: /Nomura/i },
+  { code: "CLSA", pattern: /\bCLSA\b/i },
+  { code: "CICC", pattern: /\bCICC\b/i },
+  { code: "Macquarie", pattern: /Macquarie/i },
+  { code: "Daiwa", pattern: /Daiwa/i },
+  { code: "Loop Capital", pattern: /Loop\s*Capital/i },
+  { code: "Needham", pattern: /Needham/i },
+  { code: "KeyBanc", pattern: /KeyBanc/i },
+];
+
+function detectGlobalBroker(text: string): string {
+  for (const b of GLOBAL_BROKER_PATTERNS) {
+    if (b.pattern.test(text)) return b.code;
+  }
+  return "Wall Street / Institutional";
+}
+
+function detectDrBroker(text: string): string {
+  for (const b of DR_ISSUER_PATTERNS) {
+    if (b.pattern.test(text)) return b.code;
+  }
+  return detectGlobalBroker(text);
+}
+
+function extractGlobalTargetPrice(text: string, refPrice?: number | null): number | null {
   const patterns = [
-    /(?:ราคาเป้าหมาย|เป้าราคา|เคาะเป้า(?:สูงสุด)?|ให้เป้า|เป้าหมาย(?:ปี\s*\d+)?|Target(?:\s*Price)?|TP)\s*(?:ที่|ใหม่|เดิม|ราว|อยู่ที่)?\s*(\d+(?:\.\d{1,2})?)\s*(?:บาท|บ\.|THB)?/i,
-    /เป้า\s*(\d+(?:\.\d{1,2})?)\s*(?:บาท|บ\.)/i,
+    /(?:price\s*target|target\s*price|PT|target)\s*(?:of|to|at|raised\s*to|cut\s*to|lowered\s*to|set\s*at)?\s*(?:US\$|HK\$|\$|RMB|¥)?\s*(\d+(?:\.\d{1,2})?)/i,
+    /(?:HK\$|US\$|\$|¥)\s*(\d+(?:\.\d{1,2})?)\s*(?:price\s*target|target)/i,
   ];
   for (const re of patterns) {
     const m = text.match(re);
     if (m?.[1]) {
-      const val = Number(m[1]);
-      if (Number.isFinite(val) && val > 0.1 && val < 2000) {
-        if (referencePrice && referencePrice > 0) {
-          // Sanity check: target within 0.3x - 3.5x of current price (avoid mistaking year '69' or '2570' or profit '220 ล.')
-          if (val < referencePrice * 0.35 || val > referencePrice * 3.5) continue;
-        }
-        return Number(val.toFixed(2));
+      const v = Number(m[1]);
+      if (Number.isFinite(v) && v > 0.5 && v < 10_000) {
+        if (refPrice && refPrice > 0 && (v < refPrice * 0.35 || v > refPrice * 3.5)) continue;
+        return Number(v.toFixed(2));
       }
     }
   }
   return null;
 }
 
-export function detectRatingFromText(text: string): {
-  rating: string;
-  normalized: "Buy" | "Hold" | "Sell";
-} {
-  if (/ขาย|SELL|UNDERPERFORM|ลดน้ำหนัก/i.test(text)) {
-    return { rating: "ขาย / Underperform", normalized: "Sell" };
-  }
-  if (/ถือ|HOLD|NEUTRAL|TRADING/i.test(text) && !/แนะ.?ซื้อ|เชียร์ซื้อ|OUTPERFORM|BUY/i.test(text)) {
-    return { rating: "ถือ / Neutral", normalized: "Hold" };
-  }
-  if (/OUTPERFORM/i.test(text)) {
-    return { rating: "Outperform", normalized: "Buy" };
-  }
-  if (/ซื้อ|BUY|เชียร์|โดดเด่น|หุ้นเด่น|TOP\s*PICK/i.test(text)) {
-    return { rating: "ซื้อ (Buy)", normalized: "Buy" };
-  }
-  return { rating: "ถือ / ติดตาม", normalized: "Hold" };
-}
-
 export async function fetchDailyBrokerResearchFeeds(
   priceLookup?: Map<string, number>,
-  forceRefresh = false
+  forceRefresh = false,
+  market: MarketId = "NASDAQ100"
 ): Promise<BrokerReportItem[]> {
+  if (market === "DR") {
+    return getOrFetch(
+      "news:broker:daily_research:DR:v2",
+      15 * 60 * 1000,
+      async () => {
+        const q =
+          '("DR" OR "NVDA80" OR "AAPL80" OR "MSFT80" OR "TSLA80" OR "TENCENT80" OR "BABA80" OR "BYDCOM80" OR "NDX01" OR "CN01") (หุ้นต่างประเทศ OR โบรก OR แนะนำ OR น่าสนใจ) when:14d';
+        const items = await fetchRss(gnewsUrl(q, "th"), "ข่าว DR หุ้นนอก", "broker_research", 30);
+        return items.map((item, idx) => {
+          const matched = extractGlobalTickersFromText(`${item.title} ${item.snippet ?? ""}`);
+          const sym = matched.find((m) => m.market === "DR")?.symbol ?? "NVDA80";
+          const { rating, normalized } = detectRatingFromText(item.title);
+          return {
+            id: `dr-br-${idx}`,
+            symbol: sym,
+            market: "DR",
+            currency: "THB",
+            broker: detectDrBroker(item.title),
+            rating,
+            ratingNormalized: normalized,
+            targetPrice: null,
+            currentPrice: priceLookup?.get(sym) ?? null,
+            upsidePct: null,
+            reportDate: item.pubDate.slice(0, 10),
+            headline: item.title,
+            url: item.link,
+            source: item.source,
+          };
+        });
+      },
+      forceRefresh
+    );
+  }
+
   return getOrFetch(
-    "news:broker:daily_research",
+    `news:broker:daily_research:v2:${market}`,
     15 * 60 * 1000,
     async () => {
-      const queries = [
-        '("ราคาเป้าหมาย" OR "เคาะเป้า") ("บล." OR โบรก) ("ซื้อ" OR "Outperform" OR "ถือ" OR "ขาย") when:14d',
-        '("บล.ดาโอ" OR "บล.กสิกร" OR "บล.กรุงศรี" OR "บล.บัวหลวง" OR "บล.หยวนต้า" OR "บล.ฟินันเซีย" OR "อินโนเวสท์ เอกซ์") เป้าหมาย หุ้น when:14d',
-        '("บล.พาย" OR "บล.เคจีไอ" OR "บล.เอเซีย พลัส" OR "บล.ทิสโก้" OR "บล.เมย์แบงก์" OR "บล.ทรีนีตี้" OR "บล.ยูโอบี") ราคาเป้าหมาย when:14d',
-        '(site:kaohoon.com OR site:thunhoon.com OR site:hoonsmart.com OR site:mitihoon.com OR site:efinancethai.com) ("เป้า" OR "โบรก") ("ซื้อ" OR "ถือ") when:7d',
-      ];
+      const queries =
+        market === "HK"
+          ? [
+              '("Tencent" OR "Alibaba" OR "BYD" OR "Meituan" OR "Xiaomi" OR "HSBC" OR "AIA" OR "Pop Mart" OR "HKEX") ("price target" OR "Buy" OR "Overweight" OR "Outperform") ("Goldman Sachs" OR "Morgan Stanley" OR "JPMorgan" OR "Nomura" OR "HSBC" OR "Citi" OR "UBS" OR "CLSA") when:14d',
+              '("0700.HK" OR "9988.HK" OR "1211.HK" OR "1810.HK" OR "3690.HK" OR "0005.HK") analyst "price target" when:14d',
+            ]
+          : market === "CHINA"
+            ? [
+                '("Alibaba" OR "PDD" OR "JD.com" OR "Baidu" OR "NIO" OR "XPeng" OR "Li Auto" OR "Moutai" OR "CATL" OR "Trip.com") ("price target" OR "Buy" OR "Overweight" OR "Outperform") ("Goldman Sachs" OR "Morgan Stanley" OR "JPMorgan" OR "Nomura" OR "CICC" OR "Citi" OR "UBS" OR "Jefferies") when:14d',
+                '("BABA" OR "PDD" OR "JD" OR "BIDU" OR "NIO" OR "XPEV" OR "600519.SS" OR "300750.SZ") analyst "price target" when:14d',
+              ]
+            : market === "NASDAQ100"
+              ? [
+                  '("NVDA" OR "AAPL" OR "MSFT" OR "AMZN" OR "META" OR "TSLA" OR "AVGO" OR "AMD" OR "PLTR" OR "NFLX" OR "GOOGL") ("price target" OR "upgrade" OR "downgrade") ("Goldman Sachs" OR "Morgan Stanley" OR "JPMorgan" OR "Wedbush" OR "UBS" OR "BofA" OR "Barclays" OR "Jefferies" OR "Citi") when:10d',
+                  'Nasdaq stock analyst "price target" ("Buy" OR "Overweight" OR "Outperform") when:7d',
+                ]
+              : [
+                  '("NVDA" OR "AAPL" OR "MSFT" OR "JPM" OR "LLY" OR "AMZN" OR "META" OR "UNH" OR "COST" OR "CRM" OR "ORCL") ("price target" OR "upgrade" OR "Overweight") ("Goldman Sachs" OR "Morgan Stanley" OR "JPMorgan" OR "Bank of America" OR "Citi" OR "Wells Fargo" OR "Barclays") when:10d',
+                  '"S&P 500" stock analyst "price target" ("Buy" OR "Outperform" OR "Overweight") when:7d',
+                ];
 
-      const [feedGroups, kaohoon, hoonsmart, mitihoon] = await Promise.all([
-        Promise.all(queries.map((q) => fetchRss(gnewsUrl(q), "โบรกเกอร์", "broker_research", 18))),
-        fetchRss("https://www.kaohoon.com/feed", "ข่าวหุ้นธุรกิจ", "broker_research", 15),
-        fetchRss("https://hoonsmart.com/feed", "HoonSmart", "broker_research", 15),
-        fetchRss("https://www.mitihoon.com/feed", "มิติหุ้น", "broker_research", 20),
-      ]);
-
-      const allItems = [...feedGroups.flat(), ...kaohoon, ...hoonsmart, ...mitihoon];
+      const groups = await Promise.all(
+        queries.map((q) => fetchRss(gnewsUrl(q, "en"), "Wall Street Research", "broker_research", 22))
+      );
+      const allItems = groups.flat();
       const reports: BrokerReportItem[] = [];
-      const seenKey = new Set<string>();
+      const seen = new Set<string>();
 
       for (const item of allItems) {
         const text = `${item.title} ${item.snippet ?? ""}`;
-        // Must look like analyst/broker commentary
-        if (!/บล\.|โบรก|เป้า|ซื้อ|Outperform|ถือ|ขาย|Analyst|Target|แนะนำ/i.test(text)) {
-          continue;
-        }
-        const tickers = extractThaiTickersFromText(text);
-        if (tickers.length === 0) continue;
+        const matchedMetas = extractGlobalTickersFromText(text);
+        if (matchedMetas.length === 0) continue;
 
-        const broker = detectBrokerName(text);
+        const broker = detectGlobalBroker(text);
         const { rating, normalized } = detectRatingFromText(text);
 
-        for (const sym of tickers.slice(0, 2)) {
-          const curPrice = priceLookup?.get(sym) ?? null;
-          const targetPrice = extractTargetPriceFromText(text, curPrice);
+        for (const meta of matchedMetas.slice(0, 2)) {
+          if (market === "HK" && meta.market !== "HK") continue;
+          if (market === "CHINA" && meta.market !== "CHINA") continue;
+          if ((market === "SP500" || market === "NASDAQ100") && meta.tvMarket !== "america") continue;
+
+          const curPrice = priceLookup?.get(meta.symbol) ?? null;
+          const targetPrice = extractGlobalTargetPrice(text, curPrice);
           const upsidePct =
             targetPrice && curPrice && curPrice > 0
               ? Number((((targetPrice - curPrice) / curPrice) * 100).toFixed(1))
               : null;
-
-          const dedupeKey = `${sym}|${broker}|${item.title.slice(0, 32)}`;
-          if (seenKey.has(dedupeKey)) continue;
-          seenKey.add(dedupeKey);
+          const dedupeKey = `${meta.symbol}|${broker}|${item.title.slice(0, 32)}`;
+          if (seen.has(dedupeKey)) continue;
+          seen.add(dedupeKey);
 
           reports.push({
-            id: `br-${sym}-${reports.length}`,
-            symbol: sym,
+            id: `gbr-${meta.symbol}-${reports.length}`,
+            symbol: meta.symbol,
+            market,
+            currency: meta.currency,
             broker,
             rating,
             ratingNormalized: normalized,
@@ -401,13 +534,11 @@ export async function fetchDailyBrokerResearchFeeds(
       }
 
       reports.sort((a, b) => {
-        // Prioritize reports with explicit target price & recent date
         const dateDiff = b.reportDate.localeCompare(a.reportDate);
         if (dateDiff !== 0) return dateDiff;
         return (b.targetPrice ? 1 : 0) - (a.targetPrice ? 1 : 0);
       });
-
-      return reports.slice(0, 120);
+      return reports.slice(0, 80);
     },
     forceRefresh
   );

@@ -13,6 +13,7 @@ import {
   X,
   XCircle,
 } from "lucide-react";
+import { formatPrice } from "@/lib/markets";
 import type { DataAuditItem, TradePlanCardData } from "@/lib/types";
 
 export function SentimentBadge({
@@ -123,19 +124,19 @@ export function TradePlanCard({
         <div className="rounded-lg bg-slate-950/70 border border-slate-800 p-2 text-center">
           <div className="text-[10px] text-slate-400 uppercase">Entry</div>
           <div className="text-sm font-bold text-sky-300 tabular-nums">
-            {Number(plan.entry).toFixed(2)} บ.
+            {formatPrice(Number(plan.entry), plan.currency)}
           </div>
         </div>
         <div className="rounded-lg bg-slate-950/70 border border-rose-500/25 p-2 text-center">
           <div className="text-[10px] text-rose-300 uppercase">Stop Loss</div>
           <div className="text-sm font-bold text-rose-400 tabular-nums">
-            {Number(plan.stop).toFixed(2)} บ.
+            {formatPrice(Number(plan.stop), plan.currency)}
           </div>
         </div>
         <div className="rounded-lg bg-slate-950/70 border border-emerald-500/25 p-2 text-center">
           <div className="text-[10px] text-emerald-300 uppercase">Target</div>
           <div className="text-sm font-bold text-emerald-400 tabular-nums">
-            {Number(plan.target).toFixed(2)} บ.
+            {formatPrice(Number(plan.target), plan.currency)}
           </div>
         </div>
       </div>
@@ -145,7 +146,10 @@ export function TradePlanCard({
           <div className="flex flex-wrap gap-3 text-[11px] text-slate-400">
             {plan.iaaTarget ? (
               <span>
-                เป้า IAA เฉลี่ย: <strong className="text-amber-300">{plan.iaaTarget} บ.</strong>
+                เป้า Consensus เฉลี่ย:{" "}
+                <strong className="text-amber-300">
+                  {formatPrice(Number(plan.iaaTarget), plan.currency)}
+                </strong>
               </span>
             ) : null}
             {plan.timeMachineWinPct ? (
@@ -193,7 +197,7 @@ export function CollapsibleDisclaimer() {
         <div className="flex items-center gap-2 font-medium">
           <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
           <span>
-            คำเตือนความเสี่ยง: SET 360° AI รวบรวมข้อมูลสาธารณะและจำลองสถิติเพื่อการศึกษาเท่านั้น มิใช่คำแนะนำการลงทุน โปรดตรวจสอบต้นฉบับก่อนตัดสินใจ
+            คำเตือนความเสี่ยง: GLOBAL 360° AI รวบรวมข้อมูลตลาดต่างประเทศสาธารณะและจำลองสถิติเพื่อการศึกษาเท่านั้น มิใช่คำแนะนำการลงทุน โปรดตรวจสอบต้นฉบับและความเสี่ยงอัตราแลกเปลี่ยนก่อนตัดสินใจ
           </span>
         </div>
         <div className="flex items-center gap-2 shrink-0">

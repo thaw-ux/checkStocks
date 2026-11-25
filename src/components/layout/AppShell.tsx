@@ -133,14 +133,14 @@ export function AppShell() {
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <span className="text-base sm:text-lg font-extrabold tracking-tight text-slate-900 dark:text-white truncate">
-                    SET <span className="text-sky-500">360° AI</span>
+                    GLOBAL <span className="text-sky-500">360° AI</span>
                   </span>
                   <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/15 text-amber-600 dark:text-amber-300 border border-amber-500/30">
                     Quant + Gemini Pro
                   </span>
                 </div>
                 <p className="text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 truncate">
-                  ผู้ช่วยวิเคราะห์หุ้นไทยอัจฉริยะ · Yahoo Finance · Consensus · โบรกเกอร์ 20+ ค่าย
+                  🇺🇸 S&P 500 · Nasdaq 100 · 🇭🇰 ฮ่องกง HKEX · 🇨🇳 จีน A-Share/ADR · 🇹🇭 DR หุ้นนอก · Smart Confluence S/R
                 </p>
               </div>
             </div>
@@ -277,7 +277,7 @@ export function AppShell() {
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-bold flex items-center gap-2">
                 <Settings className="h-4 w-4 text-sky-500" />
-                ตั้งค่าระบบ SET 360° AI
+                ตั้งค่าระบบ GLOBAL 360° AI
               </h3>
               <button
                 type="button"

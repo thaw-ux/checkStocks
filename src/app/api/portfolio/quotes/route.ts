@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { fetchPeerMetricsBatch } from "@/lib/data/marketConsensus";
-import { normalizeThaiSymbol } from "@/lib/set50";
+import { fetchFxRatesToThb } from "@/lib/data/yahoo";
 
 export async function GET(request: Request) {
   try {
@@ -8,21 +8,28 @@ export async function GET(request: Request) {
     const symbolsRaw = searchParams.get("symbols") || "";
     const symbols = symbolsRaw
       .split(",")
-      .map(normalizeThaiSymbol)
+      .map((s) => s.trim().toUpperCase())
       .filter(Boolean)
       .slice(0, 25);
 
-    if (symbols.length === 0) {
-      return NextResponse.json({ quotes: {} });
-    }
+    const [rows, fxRates] = await Promise.all([
+      symbols.length > 0 ? fetchPeerMetricsBatch(symbols) : Promise.resolve([]),
+      fetchFxRatesToThb(),
+    ]);
 
-    const rows = await fetchPeerMetricsBatch(symbols);
-    const quotes: Record<string, { price: number | null; changePct: number | null }> = {};
+    const quotes: Record<string, { price: number | null; changePct: number | null; currency?: string }> = {};
     for (const r of rows) {
-      quotes[r.symbol] = { price: r.price, changePct: r.changePct };
+      quotes[r.symbol] = { price: r.price, changePct: r.changePct, currency: r.currency };
     }
-    return NextResponse.json({ quotes, updatedAt: new Date().toISOString() });
+    return NextResponse.json({
+      quotes,
+      fxRates,
+      updatedAt: new Date().toISOString(),
+    });
   } catch {
-    return NextResponse.json({ quotes: {} });
+    return NextResponse.json({
+      quotes: {},
+      fxRates: { USD: 34.0, HKD: 4.35, CNY: 4.8, THB: 1, updatedAt: new Date().toISOString() },
+    });
   }
 }

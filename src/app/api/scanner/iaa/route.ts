@@ -1,13 +1,15 @@
 import { NextResponse } from "next/server";
-import { fetchMarketConsensusAll } from "@/lib/data/marketConsensus";
+import { fetchMarketConsensusByMarket } from "@/lib/data/marketConsensus";
+import { parseMarketId } from "@/lib/markets";
 
 export async function GET(request: Request) {
   const start = performance.now();
   try {
     const { searchParams } = new URL(request.url);
     const forceRefresh = searchParams.get("refresh") === "1";
+    const market = parseMarketId(searchParams.get("market"), "NASDAQ100");
 
-    const { records, ok } = await fetchMarketConsensusAll(forceRefresh);
+    const { records, ok } = await fetchMarketConsensusByMarket(market, forceRefresh);
     const items = records.map((r) => ({
       ...r.consensus,
       changePct: r.changePct,
@@ -20,6 +22,7 @@ export async function GET(request: Request) {
 
     return NextResponse.json({
       ok,
+      market,
       count: items.length,
       sectors,
       items,
@@ -28,7 +31,7 @@ export async function GET(request: Request) {
     });
   } catch (err) {
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "โหลดตาราง IAA Consensus ไม่สำเร็จ" },
+      { error: err instanceof Error ? err.message : "โหลดตาราง Consensus ไม่สำเร็จ" },
       { status: 500 }
     );
   }

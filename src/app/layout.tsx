@@ -17,9 +17,9 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "SET 360° AI | ผู้ช่วยวิเคราะห์หุ้นไทยอัจฉริยะ 360°",
+  title: "GLOBAL 360° AI | ผู้ช่วยวิเคราะห์หุ้นต่างประเทศอัจฉริยะ 360°",
   description:
-    "รวมเป้า IAA & บทวิเคราะห์รายวัน สแกนหุ้น SET50 Breakout/Pullback จำลองราคา Time Machine 10,000 รอบ AI Chat Bot และพอร์ตจำลอง 360° พร้อม Paper Trade",
+    "วิเคราะห์หุ้นอเมริกา (S&P 500, Nasdaq 100), ฮ่องกง (HKEX), จีน (A-Share & US ADR) และ DR หุ้นต่างประเทศ พร้อม Smart Confluence แนวรับ-แนวต้าน, Time Machine 10,000 รอบ, AI Chat Bot และพอร์ตจำลอง 360°",
 };
 
 export default function RootLayout({

@@ -1,46 +1,53 @@
 import { NextResponse } from "next/server";
 import { getOrFetch } from "@/lib/cache";
-import { fetchMarketConsensusAll } from "@/lib/data/marketConsensus";
+import { fetchMarketConsensusByMarket } from "@/lib/data/marketConsensus";
 import { fetchYahooBatchCharts, fetchYahooChart } from "@/lib/data/yahoo";
+import { getUniverseByMarket, MARKET_CONFIGS, parseMarketId } from "@/lib/markets";
 import { buildWeeklyPortfolio360, type StockUniverseBundle } from "@/lib/quant/portfolio360";
-import { SET50_SYMBOLS } from "@/lib/set50";
 
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const forceRefresh = searchParams.get("refresh") === "1";
-    const capitalRaw = Number(searchParams.get("capital") || "100000");
+    const market = parseMarketId(searchParams.get("market"), "NASDAQ100");
+    const mCfg = MARKET_CONFIGS[market];
+
+    const capitalRaw = Number(searchParams.get("capital") || String(mCfg.defaultCapital));
     const baseCapital =
-      Number.isFinite(capitalRaw) && capitalRaw >= 10_000 && capitalRaw <= 100_000_000
+      Number.isFinite(capitalRaw) && capitalRaw >= 1_000 && capitalRaw <= 100_000_000
         ? capitalRaw
-        : 100_000;
+        : mCfg.defaultCapital;
 
     const payload = await getOrFetch(
-      `api:portfolio:weekly:${baseCapital}`,
+      `api:portfolio:weekly:v2:${market}:${baseCapital}`,
       15 * 60 * 1000,
       async () => {
-        const [setChart, batchCharts, consensusRes] = await Promise.all([
-          fetchYahooChart("^SET.BK", "1y", "1d", forceRefresh),
-          fetchYahooBatchCharts(SET50_SYMBOLS, "1y", 12, forceRefresh),
-          fetchMarketConsensusAll(false),
+        const universeMeta = getUniverseByMarket(market);
+        const yahooSymbols = universeMeta.map((u) => u.yahooSymbol);
+
+        const [benchChart, batchCharts, consensusRes] = await Promise.all([
+          fetchYahooChart(mCfg.benchmarkYahoo, "1y", "1d", forceRefresh, true),
+          fetchYahooBatchCharts(yahooSymbols, "1y", 12, forceRefresh, true),
+          fetchMarketConsensusByMarket(market, false),
         ]);
 
         const iaaMap = new Map(consensusRes.records.map((r) => [r.symbol, r.consensus]));
 
         const universe: StockUniverseBundle[] = [];
-        for (const sym of SET50_SYMBOLS) {
-          const chart = batchCharts.get(sym);
+        for (const meta of universeMeta) {
+          const chart = batchCharts.get(meta.yahooSymbol);
           if (!chart?.ok || chart.bars.length < 45) continue;
           universe.push({
-            symbol: sym,
+            symbol: meta.symbol,
             bars: chart.bars,
-            iaa: iaaMap.get(sym) ?? null,
+            iaa: iaaMap.get(meta.symbol) ?? null,
           });
         }
 
         return buildWeeklyPortfolio360({
           universe,
-          setBars: setChart.bars,
+          setBars: benchChart.bars,
+          market,
           baseCapital,
         });
       },

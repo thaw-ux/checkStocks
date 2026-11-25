@@ -1,7 +1,15 @@
 import { GoogleGenAI } from "@google/genai";
+import {
+  currencySymbol,
+  extractGlobalTickersFromText,
+  formatPrice,
+  MARKET_CONFIGS,
+  resolveStockSymbol,
+} from "../markets";
 import type {
   AffectedStockItem,
   BrokerReportItem,
+  CurrencyCode,
   DailyBriefingSection,
   GlobalMacroItem,
   IaaConsensusSummary,
@@ -13,7 +21,6 @@ import type {
   StockFundamentals,
   StockTechnicalSummary,
 } from "../types";
-import { extractThaiTickersFromText, getStockMeta } from "../set50";
 
 export function isGeminiConfigured(): boolean {
   return Boolean(process.env.GEMINI_API_KEY?.trim());
@@ -74,17 +81,23 @@ export async function generateDailyBriefingAI(params: {
   isAiGenerated: boolean;
 }> {
   const { macroCards, categorizedNews, modelOverride } = params;
-  const setCard = macroCards.find((m) => m.symbol === "^SET.BK");
   const spCard = macroCards.find((m) => m.symbol === "^GSPC");
+  const ndxCard = macroCards.find((m) => m.symbol === "^NDX");
+  const hsiCard = macroCards.find((m) => m.symbol === "^HSI");
+  const shCard = macroCards.find((m) => m.symbol === "000001.SS");
+  const vixCard = macroCards.find((m) => m.symbol === "^VIX");
   const goldCard = macroCards.find((m) => m.symbol === "GC=F");
   const oilCard = macroCards.find((m) => m.symbol === "BZ=F");
-  const thbCard = macroCards.find((m) => m.symbol === "THB=X");
+  const tnxCard = macroCards.find((m) => m.symbol === "^TNX");
+  const usdThbCard = macroCards.find((m) => m.symbol === "THB=X");
+  const hkdThbCard = macroCards.find((m) => m.symbol === "HKDTHB=X");
 
-  // Count tickers mentioned across today's news for deterministic grounding
+  // Count international tickers mentioned across today's global news
   const tickerFreq = new Map<string, number>();
   for (const list of Object.values(categorizedNews)) {
     for (const item of list) {
       for (const t of item.tickers ?? []) {
+        if (t.startsWith("^")) continue;
         tickerFreq.set(t, (tickerFreq.get(t) ?? 0) + 1);
       }
     }
@@ -94,64 +107,70 @@ export async function generateDailyBriefingAI(params: {
     .slice(0, 8)
     .map(([sym]) => sym);
 
-  const defaultAffected: AffectedStockItem[] = (
+  const defaultSymbols =
     topNewsTickers.length >= 4
       ? topNewsTickers
-      : ["BDMS", "CPALL", "AOT", "KBANK", "PTT", "PTTEP", "ADVANC", "GULF"]
-  ).map((sym) => {
-    const meta = getStockMeta(sym);
-    const oilBias = (oilCard?.changePct ?? 0) >= 0 ? "positive" : "negative";
+      : ["NVDA", "AAPL", "MSFT", "TSLA", "0700.HK", "9988.HK", "1211.HK", "600519.SS"];
+
+  const defaultAffected: AffectedStockItem[] = defaultSymbols.map((sym) => {
+    const meta = resolveStockSymbol(sym);
+    const usPositive = (spCard?.changePct ?? 0) >= 0;
+    const hkPositive = (hsiCard?.changePct ?? 0) >= 0;
     const sentiment: AffectedStockItem["sentiment"] =
-      sym === "PTT" || sym === "PTTEP"
-        ? oilBias
-        : (setCard?.changePct ?? 0) >= 0
+      meta.market === "HK" || meta.market === "CHINA"
+        ? hkPositive
+          ? "positive"
+          : "neutral"
+        : usPositive
           ? "positive"
           : "neutral";
     return {
-      symbol: sym,
+      symbol: meta.symbol,
+      market: meta.market,
+      currency: meta.currency,
       sector: meta.sector,
       sentiment,
-      reason: `ถูกกล่าวถึงในกระแสข่าวและดัชนีตลาดวันนี้ (${meta.sector})`,
+      reason: `ถูกกล่าวถึงในพาดหัวข่าวตลาดโลกและเชื่อมโยงกับความเคลื่อนไหวกลุ่ม ${meta.sector}`,
     };
   });
 
   const moodDefault: "Risk-On" | "Neutral" | "Risk-Off" =
-    (setCard?.changePct ?? 0) > 0.4 && (spCard?.changePct ?? 0) >= 0
+    (spCard?.changePct ?? 0) > 0.35 && (ndxCard?.changePct ?? 0) > 0.35 && (vixCard?.price ?? 18) < 22
       ? "Risk-On"
-      : (setCard?.changePct ?? 0) < -0.5 || (spCard?.changePct ?? 0) < -0.8
+      : (spCard?.changePct ?? 0) < -0.7 || (ndxCard?.changePct ?? 0) < -1.0 || (vixCard?.price ?? 18) > 25
         ? "Risk-Off"
         : "Neutral";
 
   const fallbackSections: DailyBriefingSection[] = [
     {
-      key: "atmosphere",
-      title: "1. บรรยากาศการลงทุนวันนี้",
-      content: `ดัชนี SET Index อยู่ที่ ${setCard?.price?.toFixed(2) ?? "-"} จุด (${(setCard?.changePct ?? 0) >= 0 ? "+" : ""}${setCard?.changePct?.toFixed(2) ?? "0"}%) ท่ามกลางภาพรวมตลาดโลกโทน ${moodDefault} โดย S&P 500 เคลื่อนไหว ${(spCard?.changePct ?? 0) >= 0 ? "+" : ""}${spCard?.changePct?.toFixed(2) ?? "0"}%`,
+      key: "us_mood",
+      title: "1. ภาพรวมตลาดสหรัฐฯ & โหมดความเสี่ยงโลก",
+      content: `ดัชนี S&P 500 อยู่ที่ ${spCard?.price?.toFixed(2) ?? "-"} (${(spCard?.changePct ?? 0) >= 0 ? "+" : ""}${spCard?.changePct?.toFixed(2) ?? "0"}%) และ Nasdaq 100 อยู่ที่ ${ndxCard?.price?.toFixed(2) ?? "-"} (${(ndxCard?.changePct ?? 0) >= 0 ? "+" : ""}${ndxCard?.changePct?.toFixed(2) ?? "0"}%) ขณะที่ VIX อยู่ที่ ${vixCard?.price?.toFixed(2) ?? "-"} สะท้อนโหมดตลาด ${moodDefault}`,
     },
     {
-      key: "sectors",
-      title: "2. กลุ่มอุตสาหกรรมที่โดดเด่น / ควรระวัง",
-      content: `กลุ่มพลังงานเชื่อมโยงราคาน้ำมันดิบ Brent (${oilCard?.price?.toFixed(2) ?? "-"} USD, ${oilCard?.changePct?.toFixed(2) ?? "0"}%) ขณะที่กลุ่มค้าปลีก-การแพทย์-สื่อสารยังคงเป็นกลุ่ม Defensive ที่ตลาดใช้พักเงินเมื่อความผันผวนสูง`,
+      key: "us_tech",
+      title: "2. หุ้นเทคฯ AI & กลุ่มนำตลาดสหรัฐฯ",
+      content: `ติดตามกลุ่มชิป AI, Cloud และ Mega-Cap Tech (NVDA, AAPL, MSFT, META, AVGO) รวมถึงรายงานปรับราคาเป้าหมายล่าสุดจาก Wall Street ในแท็บพาดหัวข่าวด้านล่าง`,
     },
     {
-      key: "global_flow",
-      title: "3. เชื่อมโยงตลาดโลก & ฟันด์โฟลว์",
-      content: `ค่าเงินบาท (USD/THB) เคลื่อนไหวบริเวณ ${thbCard?.price?.toFixed(2) ?? "-"} บาท/ดอลลาร์ และราคาทองคำโลกอยู่ที่ ${goldCard?.price?.toFixed(2) ?? "-"} USD สะท้อนทิศทางกระแสเงินทุนต่างชาติและการป้องกันความเสี่ยง`,
+      key: "hk_china",
+      title: "3. ตลาดฮ่องกง (HKEX) & หุ้นจีน (A-Share / ADR)",
+      content: `Hang Seng ฮ่องกงเคลื่อนไหวที่ ${hsiCard?.price?.toFixed(2) ?? "-"} (${(hsiCard?.changePct ?? 0) >= 0 ? "+" : ""}${hsiCard?.changePct?.toFixed(2) ?? "0"}%) และ Shanghai Composite ที่ ${shCard?.price?.toFixed(2) ?? "-"} (${(shCard?.changePct ?? 0) >= 0 ? "+" : ""}${shCard?.changePct?.toFixed(2) ?? "0"}%) จับตาแรงซื้อหุ้นเทคฯ ฮ่องกง (0700.HK, 9988.HK, 1211.HK) และจีนแผ่นดินใหญ่`,
     },
     {
-      key: "thai_econ",
-      title: "4. เศรษฐกิจและการเงินไทย",
-      content: `ติดตามพาดหัวล่าสุดด้านทิศทางดอกเบี้ยนโยบาย กนง., ภาวะส่งออก และตัวเลขเศรษฐกิจไทยจากแหล่งข่าวสาธารณะด้านล่าง (ใส่ GEMINI_API_KEY เพื่อเปิดระบบสังเคราะห์ข่าวอัจฉริยะเต็มรูปแบบ)`,
+      key: "fed_pboc",
+      title: "4. นโยบาย Fed · บอนด์ยีลด์ 10Y & PBOC",
+      content: `บอนด์ยีลด์สหรัฐฯ 10 ปีอยู่ที่ ${tnxCard?.price?.toFixed(2) ?? "-"}% เป็นตัวแปรหลักต่อ Valuation หุ้น Growth สหรัฐฯ ควบคู่มาตรการสภาพคล่องและกระตุ้นเศรษฐกิจจากฝั่งจีน`,
     },
     {
-      key: "politics",
-      title: "5. การเมืองและนโยบายภาครัฐ",
-      content: `ติดตามมาตรการกระตุ้นเศรษฐกิจ การเบิกจ่ายงบประมาณ และเสถียรภาพนโยบายรัฐซึ่งมีผลต่อกลุ่มรับเหมา ค้าปลีก และนิคมอุตสาหกรรม`,
+      key: "commodities_fx",
+      title: "5. ทองคำ · น้ำมัน & ค่าเงินบาท (USD/THB · HKD/THB)",
+      content: `ทองคำโลกอยู่ที่ ${goldCard?.price?.toFixed(2) ?? "-"} USD, น้ำมัน Brent ${oilCard?.price?.toFixed(2) ?? "-"} USD ขณะที่อัตราแลกเปลี่ยน USD/THB อยู่ที่ ${usdThbCard?.price?.toFixed(2) ?? "-"} ฿ และ HKD/THB อยู่ที่ ${hkdThbCard?.price?.toFixed(2) ?? "-"} ฿ (มีผลโดยตรงต่อต้นทุนแลกเงินและราคา DR)`,
     },
     {
-      key: "consumer",
-      title: "6. สังคม ท่องเที่ยว และกำลังซื้อ",
-      content: `ติดตามตัวเลขนักท่องเที่ยวต่างชาติและดัชนีความเชื่อมั่นผู้บริโภคที่เป็นแรงขับเคลื่อนหลักของกลุ่มสนามบิน โรงแรม และค้าปลีก`,
+      key: "trade_dr",
+      title: "6. ภาษีการค้าโลก & มุมมอง DR หุ้นต่างประเทศ",
+      content: `ติดตามความเคลื่อนไหวกำแพงภาษีนำเข้าและการจำกัดส่งออกชิประหว่างสหรัฐฯ-จีน ซึ่งส่งผลต่อทั้งหุ้นสหรัฐฯ/ฮ่องกง/จีน และราคา DR หุ้นนอก (NVDA80, TENCENT80, BABA80, NDX01) — ใส่ GEMINI_API_KEY เพื่อเปิดระบบสังเคราะห์ข่าว AI เต็มรูปแบบ`,
     },
   ];
 
@@ -159,7 +178,7 @@ export async function generateDailyBriefingAI(params: {
   const model = getFlashModelName(modelOverride);
   if (!client) {
     return {
-      headline: `สรุปภาวะตลาดหุ้นไทย & โลก (${moodDefault}) — โหมดข้อมูลสด (ยังไม่ได้ตั้งค่า GEMINI_API_KEY)`,
+      headline: `Global Morning Briefing (${moodDefault}) — สหรัฐฯ · ฮ่องกง · จีน (โหมดข้อมูลสด)`,
       mood: moodDefault,
       sections: fallbackSections,
       affectedStocks: defaultAffected,
@@ -183,31 +202,32 @@ export async function generateDailyBriefingAI(params: {
       })
       .join("\n\n");
 
-    const prompt = `คุณคือนักกลยุทธ์ตลาดหุ้นไทยอาวุโส สรุปภาวะตลาดและข่าวใหญ่ประจำวันเป็นภาษาไทยที่กระชับ คมชัด อ่านจบใน 1 นาที โดยยึดเฉพาะข้อเท็จจริงจากข้อมูลตลาดและพาดหัวข่าวด้านล่าง ห้ามแต่งตัวเลขขึ้นเอง
+    const prompt = `คุณคือนักกลยุทธ์การลงทุนหุ้นต่างประเทศอาวุโส (Global Equity Strategist) เชี่ยวชาญตลาดสหรัฐฯ (S&P 500, Nasdaq 100), ฮ่องกง (HKEX), จีน (A-Share & US ADR) และ DR หุ้นต่างประเทศ
+หน้าที่ของคุณคือสรุป Global Morning Briefing ประจำวันเป็นภาษาไทย 100% ที่กระชับ คมชัด อ่านจบใน 1 นาที โดยยึดเฉพาะข้อเท็จจริงจากตัวเลขตลาดและพาดหัวข่าวต่างประเทศด้านล่าง ห้ามแต่งตัวเลขขึ้นเอง และห้ามพูดถึงหุ้นไทย SET (ยกเว้น DR หุ้นนอกถ้าเกี่ยวข้อง)
 
-ข้อมูลตลาดโลกและไทยล่าสุด:
+ข้อมูลดัชนีตลาดโลกและอัตราแลกเปลี่ยนล่าสุด:
 ${macroText}
 
-พาดหัวข่าวสาธารณะล่าสุดแยกหมวด:
+พาดหัวข่าวการเงินต่างประเทศล่าสุดแยก 7 หมวด:
 ${newsDigest}
 
 ตอบกลับเป็น JSON ตามโครงสร้างนี้เท่านั้น (ห้ามมีข้อความนอก JSON):
 {
-  "headline": "พาดหัวสรุปภาวะตลาดวันนี้ 1 บรรทัดแบบคมชัด",
+  "headline": "พาดหัวสรุปภาวะตลาดหุ้นโลก สหรัฐฯ-ฮ่องกง-จีน วันนี้ 1 บรรทัดแบบคมชัด",
   "mood": "Risk-On" | "Neutral" | "Risk-Off",
   "sections": [
-    { "key": "atmosphere", "title": "1. บรรยากาศการลงทุนวันนี้", "content": "..." },
-    { "key": "sectors", "title": "2. กลุ่มอุตสาหกรรมที่โดดเด่น / ควรระวัง", "content": "..." },
-    { "key": "global_flow", "title": "3. เชื่อมโยงตลาดโลก & ฟันด์โฟลว์", "content": "..." },
-    { "key": "thai_econ", "title": "4. เศรษฐกิจและการเงินไทย", "content": "..." },
-    { "key": "politics", "title": "5. การเมืองและนโยบายภาครัฐ", "content": "..." },
-    { "key": "consumer", "title": "6. สังคม ท่องเที่ยว และกำลังซื้อ", "content": "..." }
+    { "key": "us_mood", "title": "1. ภาพรวมตลาดสหรัฐฯ & โหมดความเสี่ยงโลก", "content": "..." },
+    { "key": "us_tech", "title": "2. หุ้นเทคฯ AI & กลุ่มนำตลาดสหรัฐฯ", "content": "..." },
+    { "key": "hk_china", "title": "3. ตลาดฮ่องกง (HKEX) & หุ้นจีน (A-Share / ADR)", "content": "..." },
+    { "key": "fed_pboc", "title": "4. นโยบาย Fed · บอนด์ยีลด์ 10Y & PBOC", "content": "..." },
+    { "key": "commodities_fx", "title": "5. ทองคำ · น้ำมัน & ค่าเงินบาท (USD/THB · HKD/THB)", "content": "..." },
+    { "key": "trade_dr", "title": "6. ภาษีการค้าโลก & มุมมอง DR หุ้นต่างประเทศ", "content": "..." }
   ],
   "affectedStocks": [
-    { "symbol": "PTT", "sector": "พลังงาน", "sentiment": "positive" | "neutral" | "negative", "reason": "เหตุผลสั้นๆ 1 ประโยค" }
+    { "symbol": "NVDA", "sector": "Semiconductors", "sentiment": "positive" | "neutral" | "negative", "reason": "เหตุผลสั้นๆ 1 ประโยคเป็นภาษาไทย" }
   ]
 }
-ให้เลือก affectedStocks 6-8 หุ้นไทย SET จริงที่เกี่ยวข้องกับข่าวและภาวะตลาดวันนี้ที่สุด`;
+ให้เลือก affectedStocks 6-8 หุ้นต่างประเทศจริงผสมกันระหว่างสหรัฐฯ (เช่น NVDA, AAPL, MSFT, TSLA, META, JPM), ฮ่องกง (เช่น 0700.HK, 9988.HK, 1211.HK, 1810.HK, 3690.HK), จีน A-Share/ADR (เช่น BABA, PDD, 600519.SS, 300750.SZ) หรือ DR (เช่น NVDA80, TENCENT80) ที่เชื่อมโยงกับข่าววันนี้มากที่สุด`;
 
     const response = await client.models.generateContent({
       model,
@@ -226,20 +246,30 @@ ${newsDigest}
       throw new Error("Invalid JSON from Gemini");
     }
 
+    const normalizedAffected =
+      parsed.affectedStocks && parsed.affectedStocks.length > 0
+        ? parsed.affectedStocks.slice(0, 8).map((item) => {
+            const meta = resolveStockSymbol(item.symbol);
+            return {
+              ...item,
+              symbol: meta.symbol,
+              market: meta.market,
+              currency: meta.currency,
+            };
+          })
+        : defaultAffected;
+
     return {
-      headline: parsed.headline || `สรุปภาวะตลาดหุ้นไทย (${parsed.mood ?? moodDefault})`,
+      headline: parsed.headline || `Global Morning Briefing (${parsed.mood ?? moodDefault})`,
       mood: parsed.mood ?? moodDefault,
       sections: parsed.sections,
-      affectedStocks:
-        parsed.affectedStocks && parsed.affectedStocks.length > 0
-          ? parsed.affectedStocks.slice(0, 8)
-          : defaultAffected,
+      affectedStocks: normalizedAffected,
       modelUsed: model,
       isAiGenerated: true,
     };
   } catch {
     return {
-      headline: `สรุปภาวะตลาดหุ้นไทย & โลก (${moodDefault})`,
+      headline: `Global Morning Briefing (${moodDefault}) — สหรัฐฯ · ฮ่องกง · จีน`,
       mood: moodDefault,
       sections: fallbackSections,
       affectedStocks: defaultAffected,
@@ -255,48 +285,53 @@ export async function analyzeNewsImpactAI(params: {
   modelOverride?: string;
 }): Promise<NewsImpactResult> {
   const { text, sourceUrl, modelOverride } = params;
-  const detectedTickers = extractThaiTickersFromText(text);
+  const detectedMetas = extractGlobalTickersFromText(text);
   const client = getClient();
   const model = getFlashModelName(modelOverride);
 
-  if (!client) {
-    const stocks: AffectedStockItem[] = (
-      detectedTickers.length > 0 ? detectedTickers : ["PTT", "CPALL", "AOT", "KBANK"]
-    )
-      .slice(0, 6)
-      .map((sym) => ({
-        symbol: sym,
-        sector: getStockMeta(sym).sector,
-        sentiment: /ลด|ร่วง|เสี่ยง|ชะลอ|ขาดทุน/.test(text)
-          ? "negative"
-          : /พุ่ง|โต|นิวไฮ|ลดดอกเบี้ย|กระตุ้น|สถิติใหม่/.test(text)
-            ? "positive"
-            : "neutral",
-        reason: "ตรวจพบความเชื่อมโยงจากประเด็นข่าวที่ระบุ (ใส่ GEMINI_API_KEY เพื่อวิเคราะห์เชิงลึก)",
-      }));
+  const buildFallbackStocks = (): AffectedStockItem[] => {
+    const base =
+      detectedMetas.length > 0
+        ? detectedMetas
+        : ["NVDA", "AAPL", "0700.HK", "9988.HK", "BABA", "NVDA80"].map((s) => resolveStockSymbol(s));
+    return base.slice(0, 6).map((meta) => ({
+      symbol: meta.symbol,
+      market: meta.market,
+      currency: meta.currency,
+      sector: meta.sector,
+      sentiment: /ลดเป้า|ร่วง|เสี่ยง|ชะลอ|ภาษีนำเข้า|จำกัดส่งออก|cut|downgrade|drop|tariff/i.test(text)
+        ? "negative"
+        : /พุ่ง|โต|นิวไฮ|ลดดอกเบี้ย|กระตุ้น|สถิติใหม่|beat|upgrade|stimulus|rally/i.test(text)
+          ? "positive"
+          : "neutral",
+      reason: "ตรวจพบความเชื่อมโยงจากประเด็นข่าวต่างประเทศที่ระบุ (เชื่อมต่อ GEMINI_API_KEY เพื่อวิเคราะห์เชิงลึก)",
+    }));
+  };
 
+  if (!client) {
+    const stocks = buildFallbackStocks();
     return {
       headline: text.slice(0, 90),
       overallImpact: "ผสมผสาน (Mixed)",
       summary:
-        "วิเคราะห์เบื้องต้นจากคำสำคัญและชื่อหุ้นไทยในข้อความ (เชื่อมต่อ GEMINI_API_KEY เพื่อเปิดการวิเคราะห์ผลกระทบเชิงลึกแบบ AI Pro)",
+        "วิเคราะห์เบื้องต้นจากคำสำคัญและชื่อหุ้นต่างประเทศในข้อความ (เชื่อมต่อ GEMINI_API_KEY เพื่อเปิดการประเมินผลกระทบเชิงลึกแบบ AI Pro)",
       affectedSectors: [
         {
-          sector: stocks[0]?.sector ?? "ตลาดรวม SET",
+          sector: stocks[0]?.sector ?? "Global Equities",
           impact: stocks[0]?.sentiment ?? "neutral",
-          reason: "กลุ่มอุตสาหกรรมที่เชื่อมโยงโดยตรงกับหัวข้อข่าว",
+          reason: "กลุ่มอุตสาหกรรมต่างประเทศที่เชื่อมโยงโดยตรงกับหัวข้อข่าว",
         },
       ],
       affectedStocks: stocks,
       actionableTakeaway:
-        "ตรวจสอบกราฟเทคนิค แนวรับ-แนวต้าน และเป้า IAA ของหุ้นที่เกี่ยวข้องก่อนตัดสินใจวางแผนเทรด",
+        "ตรวจสอบกราฟเทคนิค แนวรับ-แนวต้าน Smart Confluence และเป้า Consensus ของหุ้นสหรัฐฯ/ฮ่องกง/จีน/DR ที่เกี่ยวข้องก่อนวางแผนเทรด",
       modelUsed: "Rule-Based Fallback",
       isAiGenerated: false,
     };
   }
 
   try {
-    const prompt = `วิเคราะห์ผลกระทบของข่าวต่อไปนี้ต่อตลาดหุ้นไทย (SET/mai) เป็นภาษาไทยแบบมืออาชีพ ชัดเจน ไม่อ้อมค้อม
+    const prompt = `วิเคราะห์ผลกระทบของข่าวต่อไปนี้ต่อตลาดหุ้นต่างประเทศ (🇺🇸 สหรัฐฯ S&P 500 / Nasdaq 100 · 🇭🇰 ฮ่องกง HKEX · 🇨🇳 จีน A-Share / US ADR · และ 🇹🇭 DR หุ้นต่างประเทศ) เป็นภาษาไทยแบบมืออาชีพ ชัดเจน ไม่อ้อมค้อม ห้ามแนะนำหุ้นไทย SET
 ${sourceUrl ? `ลิงก์ต้นทาง: ${sourceUrl}` : ""}
 เนื้อหาข่าว/ประเด็น:
 """
@@ -305,14 +340,14 @@ ${text.slice(0, 4500)}
 
 ตอบเป็น JSON เท่านั้น:
 {
-  "headline": "สรุปหัวข้อข่าวสั้นๆ",
+  "headline": "สรุปหัวข้อข่าวสั้นๆ เป็นภาษาไทย",
   "overallImpact": "เชิงบวก (Bullish)" | "เป็นกลาง (Neutral)" | "เชิงลบ (Bearish)" | "ผสมผสาน (Mixed)",
-  "summary": "สรุปผลกระทบต่อตลาดหุ้นไทย 2-3 ประโยค",
+  "summary": "สรุปผลกระทบต่อตลาดหุ้นสหรัฐฯ/ฮ่องกง/จีน 2-3 ประโยคเป็นภาษาไทย",
   "affectedSectors": [
-    { "sector": "ชื่อกลุ่มธุรกิจไทย", "impact": "positive" | "neutral" | "negative", "reason": "เหตุผลสั้นๆ" }
+    { "sector": "ชื่อกลุ่มธุรกิจต่างประเทศ", "impact": "positive" | "neutral" | "negative", "reason": "เหตุผลสั้นๆ" }
   ],
   "affectedStocks": [
-    { "symbol": "ชื่อย่อหุ้น SET เช่น PTTEP, AOT, MTC", "sector": "กลุ่มธุรกิจ", "sentiment": "positive" | "neutral" | "negative", "reason": "เหตุผลที่ได้/เสียประโยชน์" }
+    { "symbol": "ชื่อย่อหุ้นจริง เช่น NVDA, AAPL, 0700.HK, 1211.HK, BABA, 600519.SS, NVDA80", "sector": "กลุ่มธุรกิจ", "sentiment": "positive" | "neutral" | "negative", "reason": "เหตุผลที่ได้/เสียประโยชน์" }
   ],
   "actionableTakeaway": "กลยุทธ์รับมือหรือจุดที่นักลงทุนควรติดตามต่อ 1-2 ประโยค"
 }`;
@@ -330,6 +365,10 @@ ${text.slice(0, 4500)}
 
     return {
       ...parsed,
+      affectedStocks: (parsed.affectedStocks ?? []).map((s) => {
+        const meta = resolveStockSymbol(s.symbol);
+        return { ...s, symbol: meta.symbol, market: meta.market, currency: meta.currency };
+      }),
       modelUsed: model,
       isAiGenerated: true,
     };
@@ -339,12 +378,7 @@ ${text.slice(0, 4500)}
       overallImpact: "ผสมผสาน (Mixed)",
       summary: "ไม่สามารถเรียก Gemini API ได้ชั่วคราว ระบบแสดงผลวิเคราะห์เบื้องต้นแทน",
       affectedSectors: [],
-      affectedStocks: detectedTickers.slice(0, 5).map((sym) => ({
-        symbol: sym,
-        sector: getStockMeta(sym).sector,
-        sentiment: "neutral",
-        reason: "ถูกกล่าวถึงในข้อความข่าว",
-      })),
+      affectedStocks: buildFallbackStocks(),
       actionableTakeaway: "ลองกดวิเคราะห์อีกครั้ง หรือตรวจสอบการตั้งค่า GEMINI_API_KEY",
       modelUsed: "Rule-Based Fallback",
       isAiGenerated: false,
@@ -354,6 +388,9 @@ ${text.slice(0, 4500)}
 
 export async function synthesizeStockSinglePassAI(params: {
   symbol: string;
+  yahooSymbol?: string;
+  currency?: CurrencyCode;
+  marketLabel?: string;
   companyName: string;
   technicals: StockTechnicalSummary;
   fundamentals: StockFundamentals;
@@ -375,15 +412,20 @@ export async function synthesizeStockSinglePassAI(params: {
     modelOverride,
   } = params;
 
-  const yahooUrl = `https://finance.yahoo.com/quote/${symbol}.BK`;
-  const settradeUrl = iaaConsensus.settradeUrl;
+  const resolved = resolveStockSymbol(symbol, iaaConsensus.market);
+  const yahooSym = params.yahooSymbol ?? resolved.yahooSymbol;
+  const cur: CurrencyCode = params.currency ?? iaaConsensus.currency ?? resolved.currency;
+  const unit = currencySymbol(cur);
+  const marketLabel = params.marketLabel ?? MARKET_CONFIGS[resolved.market].label;
+
+  const yahooUrl = `https://finance.yahoo.com/quote/${encodeURIComponent(yahooSym)}`;
+  const refUrl = iaaConsensus.settradeUrl || `${yahooUrl}/analysis`;
   const risk = Math.max(0.01, technicals.price - technicals.standardStop);
   const rrRatio = Number(((technicals.shortTarget - technicals.price) / risk).toFixed(2));
 
-  // Deterministic 5-rule checklist (always verifiable!)
   const checklist5: StockAiSynthesis["checklist5"] = [
     {
-      label: "1. มูลค่า & เป้า Consensus (IAA)",
+      label: "1. มูลค่า & เป้า Consensus นักวิเคราะห์",
       status:
         iaaConsensus.upsidePct !== null
           ? iaaConsensus.upsidePct >= 10
@@ -394,7 +436,7 @@ export async function synthesizeStockSinglePassAI(params: {
           : "warn",
       detail:
         iaaConsensus.avgTargetPrice !== null
-          ? `เป้าเฉลี่ย ${iaaConsensus.avgTargetPrice.toFixed(2)} บ. (Upside ${iaaConsensus.upsidePct?.toFixed(1)}%, โบรกฯ ${iaaConsensus.totalBrokers} ราย)`
+          ? `เป้าเฉลี่ย ${formatPrice(iaaConsensus.avgTargetPrice, cur)} (Upside ${iaaConsensus.upsidePct?.toFixed(1)}%, นักวิเคราะห์ ${iaaConsensus.totalBrokers} ราย)`
           : "ยังไม่มีเป้าเฉลี่ยนักวิเคราะห์เพียงพอ",
     },
     {
@@ -407,7 +449,7 @@ export async function synthesizeStockSinglePassAI(params: {
           : "warn",
       detail:
         technicals.ema200 !== null
-          ? `ราคา ${technicals.price.toFixed(2)} vs EMA200 ${technicals.ema200.toFixed(2)} (${technicals.trendLabel})`
+          ? `ราคา ${formatPrice(technicals.price, cur)} vs EMA200 ${formatPrice(technicals.ema200, cur)} (${technicals.trendLabel})`
           : technicals.trendLabel,
     },
     {
@@ -428,18 +470,18 @@ export async function synthesizeStockSinglePassAI(params: {
     {
       label: "4. สภาพคล่อง & พื้นฐาน (Vol / P/E / Yield)",
       status:
-        (technicals.volRatio ?? 1) >= 0.8 && (fundamentals.pe === null || fundamentals.pe < 35)
+        (technicals.volRatio ?? 1) >= 0.8 && (fundamentals.pe === null || fundamentals.pe < 45)
           ? "pass"
           : "warn",
       detail: `Vol ${technicals.volRatio?.toFixed(2) ?? "-"}x ค่าเฉลี่ย 20 วัน · P/E ${fundamentals.pe?.toFixed(1) ?? "-"}x · Yield ${fundamentals.dividendYield?.toFixed(2) ?? "-"}%`,
     },
     {
-      label: "5. เกณฑ์กำกับ & ความผันผวน (ATR)",
+      label: "5. ความผันผวน (ATR) & สถานะตลาด",
       status:
-        technicals.atr14 && technicals.price > 0 && technicals.atr14 / technicals.price < 0.045
+        technicals.atr14 && technicals.price > 0 && technicals.atr14 / technicals.price < 0.055
           ? "pass"
           : "warn",
-      detail: `ATR(14) ${technicals.atr14?.toFixed(2) ?? "-"} บ. · สถานะกำกับ: ${fundamentals.cashBalanceStatus}`,
+      detail: `ATR(14) ${formatPrice(technicals.atr14, cur)} · ตลาด: ${marketLabel}`,
     },
   ];
 
@@ -456,58 +498,58 @@ export async function synthesizeStockSinglePassAI(params: {
   const fallbackSynthesis: StockAiSynthesis = {
     verdict: fallbackVerdict,
     verdictBias: fallbackVerdictBias,
-    oneLineConclusion: `ฟันธง ${symbol}: ${fallbackVerdict} (แนวรับ S1 ${technicals.s1.toFixed(2)} / แนวต้าน R1 ${technicals.r1.toFixed(2)} / Stop ${technicals.standardStop.toFixed(2)} บ.)`,
+    oneLineConclusion: `ฟันธง ${symbol}: ${fallbackVerdict} (แนวรับ S1 ${formatPrice(technicals.s1, cur)} / แนวต้าน R1 ${formatPrice(technicals.r1, cur)} / Stop ${formatPrice(technicals.standardStop, cur)})`,
     bullCase: [
       ...(iaaConsensus.avgTargetPrice
         ? [
             {
-              text: `เป้าพื้นฐานเฉลี่ยอยู่ที่ ${iaaConsensus.avgTargetPrice.toFixed(2)} บาท คิดเป็น Upside ${iaaConsensus.upsidePct?.toFixed(1)}% จากโบรกเกอร์ ${iaaConsensus.totalBrokers} ราย (แนะซื้อ ${iaaConsensus.buyCount} ราย)`,
-              sourceLabel: "IAA / Consensus",
-              sourceUrl: settradeUrl,
+              text: `เป้า Consensus เฉลี่ยอยู่ที่ ${formatPrice(iaaConsensus.avgTargetPrice, cur)} คิดเป็น Upside ${iaaConsensus.upsidePct?.toFixed(1)}% จากนักวิเคราะห์ ${iaaConsensus.totalBrokers} ราย (แนะซื้อ ${iaaConsensus.buyCount} ราย)`,
+              sourceLabel: "Analyst Consensus",
+              sourceUrl: refUrl,
             },
           ]
         : []),
       {
-        text: `โครงสร้างราคาอยู่ที่ ${technicals.price.toFixed(2)} บาท (${technicals.trendLabel}) มีแนวรับใกล้สุด S1 ที่ ${technicals.s1.toFixed(2)} บาท`,
+        text: `โครงสร้างราคาอยู่ที่ ${formatPrice(technicals.price, cur)} (${technicals.trendLabel}) มีแนวรับสำคัญ S1 ที่ ${formatPrice(technicals.s1, cur)}`,
         sourceLabel: "กราฟเทคนิค · Yahoo Finance",
         sourceUrl: yahooUrl,
       },
-      ...(fundamentals.dividendYield
+      ...(fundamentals.roe || fundamentals.dividendYield
         ? [
             {
-              text: `อัตราเงินปันผลประมาณ ${fundamentals.dividendYield.toFixed(2)}% และ ROE ${fundamentals.roe?.toFixed(1) ?? "-"}% ช่วยพยุงดาวน์ไซด์`,
-              sourceLabel: "งบการเงิน/ปันผล",
-              sourceUrl: settradeUrl,
+              text: `ROE ${fundamentals.roe?.toFixed(1) ?? "-"}% และอัตราเงินปันผล ${fundamentals.dividendYield?.toFixed(2) ?? "-"}% ช่วยหนุนพื้นฐานระยะกลาง`,
+              sourceLabel: "งบการเงิน/พื้นฐาน",
+              sourceUrl: refUrl,
             },
           ]
         : []),
     ],
     bearCase: [
       {
-        text: `หากราคาหลุดจุดตัดขาดทุนมาตรฐานที่ ${technicals.standardStop.toFixed(2)} บาท จะเสียทรงระยะสั้นและมีแนวรับถัดไปที่ S2 ${technicals.s2.toFixed(2)} บาท`,
+        text: `หากราคาปิดหลุดจุดตัดขาดทุนมาตรฐานที่ ${formatPrice(technicals.standardStop, cur)} จะเสียทรงระยะสั้นและมีแนวรับถัดไปที่ S2 ${formatPrice(technicals.s2, cur)}`,
         sourceLabel: "กราฟเทคนิค · Yahoo Finance",
         sourceUrl: yahooUrl,
       },
       {
         text:
           companyNews.length > 0
-            ? `ควรติดตามข่าวล่าสุดของบริษัท (${companyNews[0].title.slice(0, 75)}) เพื่อประเมินความต่อเนื่องของกำไร`
-            : "ช่วง 30 วันที่ผ่านมามีข่าวเฉพาะบริษัทไม่มาก ควรระวังความผันผวนตามภาวะตลาดรวม SET",
+            ? `ควรติดตามข่าวล่าสุดของบริษัท (${companyNews[0].title.slice(0, 75)}) เพื่อประเมินความต่อเนื่องของกำไรและ Guidance`
+            : `ช่วง 30 วันที่ผ่านมามีข่าวเฉพาะบริษัทไม่มาก ควรระวังความผันผวนตามภาวะตลาด ${marketLabel} และอัตราแลกเปลี่ยน`,
         sourceLabel: "ข่าวบริษัท 30 วัน",
-        sourceUrl: companyNews[0]?.link ?? settradeUrl,
+        sourceUrl: companyNews[0]?.link ?? refUrl,
       },
     ],
     fundamentalView12M: iaaConsensus.avgTargetPrice
-      ? `กรอบพื้นฐาน 12 เดือนอิง Consensus เฉลี่ย ${iaaConsensus.avgTargetPrice.toFixed(2)} บ. (ช่วง ${iaaConsensus.lowTargetPrice?.toFixed(2) ?? "-"} – ${iaaConsensus.highTargetPrice?.toFixed(2) ?? "-"} บ.) ที่ P/E ${fundamentals.pe?.toFixed(1) ?? "-"}x และ P/BV ${fundamentals.pbv?.toFixed(2) ?? "-"}x`
-      : `P/E ${fundamentals.pe?.toFixed(1) ?? "-"}x · P/BV ${fundamentals.pbv?.toFixed(2) ?? "-"}x · Yield ${fundamentals.dividendYield?.toFixed(2) ?? "-"}% (ตรวจสอบงบการเงินล่าสุดใน Settrade ประกอบ)`,
+      ? `กรอบพื้นฐาน 12 เดือนอิง Analyst Consensus เฉลี่ย ${formatPrice(iaaConsensus.avgTargetPrice, cur)} (ช่วง ${formatPrice(iaaConsensus.lowTargetPrice, cur)} – ${formatPrice(iaaConsensus.highTargetPrice, cur)}) ที่ P/E ${fundamentals.pe?.toFixed(1) ?? "-"}x และ P/BV ${fundamentals.pbv?.toFixed(2) ?? "-"}x`
+      : `P/E ${fundamentals.pe?.toFixed(1) ?? "-"}x · P/BV ${fundamentals.pbv?.toFixed(2) ?? "-"}x · Yield ${fundamentals.dividendYield?.toFixed(2) ?? "-"}% (${marketLabel})`,
     shortTermPlan: {
       entry: technicals.price,
       stop: technicals.standardStop,
       target: technicals.shortTarget,
       rrRatio,
-      note: `กรอบเทคนิค 20 วัน: แนวรับ S1 ${technicals.s1.toFixed(2)} / S2 ${technicals.s2.toFixed(2)} · แนวต้าน R1 ${technicals.r1.toFixed(2)} / R2 ${technicals.r2.toFixed(2)}`,
+      note: `กรอบเทคนิค (${unit}): แนวรับ S1 ${technicals.s1.toFixed(2)} / S2 ${technicals.s2.toFixed(2)} · แนวต้าน R1 ${technicals.r1.toFixed(2)} / R2 ${technicals.r2.toFixed(2)}`,
     },
-    riskConditions: `ยกเลิกแผนทันทีหากปิดหลุด ${technicals.standardStop.toFixed(2)} บ. หรือปริมาณการซื้อขายหดตัวผิดปกติพร้อมหลุดแนวรับหลัก`,
+    riskConditions: `ยกเลิกแผนทันทีหากปิดหลุด ${formatPrice(technicals.standardStop, cur)} หรือปริมาณการซื้อขายหดตัวพร้อมหลุดแนวรับหลัก`,
     checklist5,
     modelUsed: "Rule-Based Fallback",
     isAiGenerated: false,
@@ -518,7 +560,7 @@ export async function synthesizeStockSinglePassAI(params: {
   if (!client) return fallbackSynthesis;
 
   try {
-    const prompt = `คุณคือหัวหน้าทีมนักวิเคราะห์หุ้นไทย (AI Agents 360°) หน้าที่ของคุณคือสังเคราะห์ข้อมูลหุ้น ${symbol} (${companyName}) แบบ Single-Pass JSON รอบเดียวอย่างแม่นยำ โดยใช้เฉพาะตัวเลขและข้อเท็จจริงจาก Fact Sheet ด้านล่าง ห้ามเดาหรือสร้างตัวเลขขึ้นมาเอง
+    const prompt = `คุณคือหัวหน้าทีมนักวิเคราะห์หุ้นต่างประเทศ (GLOBAL 360° AI) หน้าที่ของคุณคือสังเคราะห์ข้อมูลหุ้น ${symbol} (${companyName} · ${marketLabel} · สกุลเงิน ${cur}) แบบ Single-Pass JSON รอบเดียวอย่างแม่นยำ โดยใช้เฉพาะตัวเลขและข้อเท็จจริงจาก Fact Sheet ด้านล่าง ห้ามเดาหรือสร้างตัวเลขขึ้นมาเอง และใช้สกุลเงิน ${cur} (${unit}) ให้ถูกต้องตลอดบทวิเคราะห์
 
 === VERIFIED FACT SHEET ===
 ${factSheetMarkdown}
@@ -528,9 +570,9 @@ ${factSheetMarkdown}
 {
   "verdict": "คำแนะนำสั้นๆ เช่น ทยอยสะสม / เก็งกำไรตามกรอบ / รอดูฐาน / หลีกเลี่ยง",
   "verdictBias": "positive" | "neutral" | "negative",
-  "oneLineConclusion": "สรุปฟันธง 1 บรรทัดชัดเจนพร้อมจุดเข้า/ตัดขาดทุน/เป้าหมาย",
+  "oneLineConclusion": "สรุปฟันธง 1 บรรทัดชัดเจนพร้อมจุดเข้า/ตัดขาดทุน/เป้าหมายในสกุลเงิน ${unit}",
   "bullCase": [
-    { "text": "ปัจจัยบวกพร้อมตัวเลขอ้างอิงจาก Fact Sheet", "sourceLabel": "IAA Consensus หรือ กราฟเทคนิค หรือ ข่าวบริษัท หรือ PDF โบรกเกอร์", "sourceUrl": "ลิงก์จริงจาก Fact Sheet" }
+    { "text": "ปัจจัยบวกพร้อมตัวเลขอ้างอิงจาก Fact Sheet", "sourceLabel": "Analyst Consensus หรือ กราฟเทคนิค หรือ ข่าวบริษัท หรือ PDF โบรกเกอร์", "sourceUrl": "ลิงก์จริงจาก Fact Sheet" }
   ],
   "bearCase": [
     { "text": "ปัจจัยเสี่ยง/ข้อจำกัดข้อมูลพร้อมตัวเลขจริง", "sourceLabel": "...", "sourceUrl": "..." }
@@ -541,11 +583,11 @@ ${factSheetMarkdown}
     "stop": ${technicals.standardStop},
     "target": ${technicals.shortTarget},
     "rrRatio": ${rrRatio},
-    "note": "อธิบายจังหวะเข้าซื้อและเงื่อนไขยืนยัน 1-2 ประโยค"
+    "note": "อธิบายจังหวะเข้าซื้อ แนวรับ-แนวต้านสำคัญ และเงื่อนไขยืนยัน 1-2 ประโยค"
   },
   "riskConditions": "เงื่อนไขที่ทำให้สมมติฐานผิดและต้องตัดขาดทุน"
 }
-สร้าง bullCase 3-4 ข้อ และ bearCase 2-3 ข้อ โดยใช้ภาษาไทยที่เป็นธรรมชาติสำหรับนักลงทุนหุ้นไทย`;
+สร้าง bullCase 3-4 ข้อ และ bearCase 2-3 ข้อ โดยใช้ภาษาไทยที่เป็นธรรมชาติสำหรับนักลงทุนไทยที่เทรดหุ้นต่างประเทศ`;
 
     const response = await client.models.generateContent({
       model,
@@ -578,6 +620,7 @@ ${factSheetMarkdown}
 
 export async function analyzeUploadedBrokerPdfAI(params: {
   symbol: string;
+  currency?: CurrencyCode;
   fileName: string;
   extractedText: string;
   currentPrice: number;
@@ -594,6 +637,7 @@ export async function analyzeUploadedBrokerPdfAI(params: {
   isAiGenerated: boolean;
 }> {
   const { symbol, fileName, extractedText, currentPrice, modelOverride } = params;
+  const cur = params.currency ?? resolveStockSymbol(symbol).currency;
   const client = getClient();
   const model = getProModelName(modelOverride);
 
@@ -612,16 +656,16 @@ export async function analyzeUploadedBrokerPdfAI(params: {
   }
 
   try {
-    const prompt = `อ่านข้อความที่สกัดจากไฟล์บทวิเคราะห์ PDF "${fileName}" ของหุ้นไทย ${symbol} (ราคาปัจจุบัน ${currentPrice.toFixed(2)} บาท) แล้วสรุปเป็นภาษาไทยแบบคมชัด
+    const prompt = `อ่านข้อความที่สกัดจากไฟล์บทวิเคราะห์ PDF "${fileName}" ของหุ้น ${symbol} (ราคาปัจจุบัน ${formatPrice(currentPrice, cur)} · สกุลเงิน ${cur}) แล้วสรุปเป็นภาษาไทยแบบคมชัด
 เนื้อหา PDF:
 """
 ${extractedText.slice(0, 5000)}
 """
 ตอบเป็น JSON เท่านั้น:
 {
-  "brokerName": "ชื่อโบรกเกอร์ในไฟล์ (ถ้าไม่พบให้ระบุ ไม่ระบุ)",
-  "rating": "คำแนะนำในไฟล์ เช่น ซื้อ / Outperform / ถือ / ขาย",
-  "targetPrice": ตัวเลขราคาเป้าหมาย หรือ null,
+  "brokerName": "ชื่อสถาบัน/โบรกเกอร์ในไฟล์ (ถ้าไม่พบให้ระบุ ไม่ระบุ)",
+  "rating": "คำแนะนำในไฟล์ เช่น ซื้อ / Outperform / Overweight / ถือ / ขาย",
+  "targetPrice": ตัวเลขราคาเป้าหมายในสกุลเงิน ${cur} หรือ null,
   "summary": "สรุปสาระสำคัญ 2-3 ประโยค",
   "keyTakeaways": ["ประเด็นสำคัญ 1", "ประเด็นสำคัญ 2", "ประเด็นสำคัญ 3"],
   "risks": ["ความเสี่ยงสำคัญ 1", "ความเสี่ยงสำคัญ 2"]
@@ -675,6 +719,7 @@ ${extractedText.slice(0, 5000)}
 
 export async function runPointInTimeReplayAI(params: {
   symbol: string;
+  currency?: CurrencyCode;
   asOfDate: string;
   priceAtAsOf: number;
   actualPriceLater: number | null;
@@ -700,10 +745,11 @@ export async function runPointInTimeReplayAI(params: {
     modelOverride,
   } = params;
 
+  const cur = params.currency ?? resolveStockSymbol(symbol).currency;
   const client = getClient();
   const model = getProModelName(modelOverride);
 
-  const deterministicSummary = `ณ วันที่ ${asOfDate} หุ้น ${symbol} ปิดที่ ${priceAtAsOf.toFixed(2)} บ. (${asOfTechSummary.trendLabel}) RSI(14) = ${asOfTechSummary.rsi14?.toFixed(1) ?? "-"} · แนวรับ S1 ${asOfTechSummary.s1.toFixed(2)} · แนวต้าน R1 ${asOfTechSummary.r1.toFixed(2)} · ตัดข้อมูลอนาคตออกครบถ้วน (ข่าวหลังวันทดสอบที่ถูกกรองออก ${excludedFutureNewsCount} รายการ)`;
+  const deterministicSummary = `ณ วันที่ ${asOfDate} หุ้น ${symbol} ปิดที่ ${formatPrice(priceAtAsOf, cur)} (${asOfTechSummary.trendLabel}) RSI(14) = ${asOfTechSummary.rsi14?.toFixed(1) ?? "-"} · แนวรับ S1 ${formatPrice(asOfTechSummary.s1, cur)} · แนวต้าน R1 ${formatPrice(asOfTechSummary.r1, cur)} · ตัดข้อมูลอนาคตออกครบถ้วน (ข่าวหลังวันทดสอบที่ถูกกรองออก ${excludedFutureNewsCount} รายการ)`;
 
   let aiSummary = deterministicSummary;
   let isAiGenerated = false;
@@ -719,8 +765,8 @@ export async function runPointInTimeReplayAI(params: {
       const prompt = `คุณกำลังอยู่ในโหมด "ทดสอบย้อนเวลาแบบปิดตา (Strict Point-in-Time Replay)"
 วันนี้คือวันที่ ${asOfDate} เท่านั้น คุณไม่รู้เหตุการณ์ใดๆ ที่เกิดขึ้นหลังวันที่ ${asOfDate} โดยเด็ดขาด!
 
-ข้อมูลหุ้น ${symbol} ณ สิ้นวัน ${asOfDate}:
-- ราคาปิด: ${priceAtAsOf.toFixed(2)} บ.
+ข้อมูลหุ้น ${symbol} (${cur}) ณ สิ้นวัน ${asOfDate}:
+- ราคาปิด: ${formatPrice(priceAtAsOf, cur)}
 - แนวโน้ม: ${asOfTechSummary.trendLabel}
 - EMA20: ${asOfTechSummary.ema20 ?? "-"}, EMA50: ${asOfTechSummary.ema50 ?? "-"}, EMA200: ${asOfTechSummary.ema200 ?? "-"}
 - RSI(14): ${asOfTechSummary.rsi14 ?? "-"}, ปริมาณซื้อขายเทียบค่าเฉลี่ย 20 วัน: ${asOfTechSummary.volRatio ?? "-"}x
@@ -745,7 +791,6 @@ ${newsLines}
     }
   }
 
-  // Zero-Future-Leakage Audit Scanner
   const asOfYear = Number(asOfDate.slice(0, 4));
   const flaggedTerms: string[] = [];
   const futureDateMatches = aiSummary.match(/20\d{2}-\d{2}-\d{2}/g) ?? [];
@@ -765,7 +810,7 @@ ${newsLines}
   const verdictAccuracy =
     actualReturnPct === null
       ? "ยังไม่มีแท่งเทียนหลังวันทดสอบ"
-      : `${daysElapsed} วันทำการต่อมา ราคาจริงอยู่ที่ ${actualPriceLater?.toFixed(2)} บ. (${actualReturnPct >= 0 ? "+" : ""}${actualReturnPct.toFixed(2)}%) — โครงสร้าง ณ วันนั้น (${asOfTechSummary.trendBias}) ${
+      : `${daysElapsed} วันทำการต่อมา ราคาจริงอยู่ที่ ${formatPrice(actualPriceLater, cur)} (${actualReturnPct >= 0 ? "+" : ""}${actualReturnPct.toFixed(2)}%) — โครงสร้าง ณ วันนั้น (${asOfTechSummary.trendBias}) ${
           (asOfTechSummary.trendBias === "bullish" && actualReturnPct >= 0) ||
           (asOfTechSummary.trendBias === "bearish" && actualReturnPct <= 0)
             ? "สอดคล้องกับทิศทางจริง"
@@ -818,21 +863,27 @@ export async function createChatStreamAI(params: {
     return { stream: fallbackStream(), modelUsed: "Live Data Fallback", isAiGenerated: false };
   }
 
-  const systemInstruction = `คุณคือ "SET 360° AI" ผู้ช่วยวิเคราะห์หุ้นไทยอัจฉริยะที่เชี่ยวชาญตลาดหุ้นไทย (SET/mai)
+  const systemInstruction = `คุณคือ "GLOBAL 360° AI" ผู้ช่วยวิเคราะห์หุ้นต่างประเทศอัจฉริยะ 5 ตลาดหลัก:
+1. 🇺🇸 สหรัฐฯ S&P 500 (USD $)
+2. 🇺🇸 สหรัฐฯ Nasdaq 100 (USD $)
+3. 🇭🇰 ฮ่องกง HKEX / Hang Seng (HKD HK$)
+4. 🇨🇳 จีนแผ่นดินใหญ่ A-Share (CNY ¥) & China US ADR (USD $)
+5. 🇹🇭 DR หุ้นต่างประเทศที่เทรดเป็นเงินบาท (THB ฿ เช่น NVDA80, AAPL80, TENCENT80, BABA80, NDX01)
+
 กติกาเหล็กในการตอบทุกครั้ง:
 1. **บรรทัดแรกสุดต้องขึ้นต้นด้วย "ฟันธง:"** สรุปมุมมองหรือคำตอบหลักให้ชัดเจนจบใน 1 บรรทัดทันที ห้ามอ้อมค้อม
-2. ใช้เฉพาะตัวเลขจริงจาก Live Context ด้านล่าง (ราคา, แนวรับ-ต้าน, EMA, RSI, เป้า IAA Consensus, ผล Time Machine 10,000 รอบ, ผลสแกน SET50, พอร์ตจำลอง 360° และพอร์ต Paper Trade ของผู้ใช้) ห้ามแต่งตัวเลขราคาหรือเป้าโบรกเกอร์ขึ้นมาเองเด็ดขาด
-3. ตอบเป็นภาษาไทยที่กระชับ อ่านง่าย จัดหมวดหมู่ด้วย Bullet ชัดเจน
-4. **สำคัญมาก:** เมื่อวิเคราะห์หรือแนะนำแผนเทรดของหุ้นไทยตัวใดตัวหนึ่ง ให้แนบบล็อก JSON พิเศษไว้ท้ายคำตอบเสมอในรูปแบบนี้เป๊ะๆ เพื่อให้เว็บแสดงการ์ดแผนเทรดที่กดส่งเข้า Time Machine / Paper Trade ได้ทันที:
+2. ใช้เฉพาะตัวเลขจริงและสกุลเงินที่ถูกต้อง (USD $ / HKD HK$ / CNY ¥ / THB ฿ สำหรับ DR) จาก Live Context ด้านล่าง ห้ามแต่งตัวเลขราคาหรือเป้าโบรกเกอร์ขึ้นมาเองเด็ดขาด
+3. ตอบเป็นภาษาไทยที่กระชับ อ่านง่าย จัดหมวดหมู่ด้วย Bullet ชัดเจน พร้อมระบุแนวรับ S1/S2, แนวต้าน R1/R2 และ Volume POC เมื่อมีใน Context
+4. **สำคัญมาก:** เมื่อวิเคราะห์หรือแนะนำแผนเทรดของหุ้นตัวใดตัวหนึ่ง ให้แนบบล็อก JSON พิเศษไว้ท้ายคำตอบเสมอในรูปแบบนี้เป๊ะๆ เพื่อให้เว็บแสดงการ์ดแผนเทรดที่กดส่งเข้า Time Machine / Paper Trade ได้ทันที:
 \`\`\`tradeplan
-{"symbol":"PTT","action":"ทยอยสะสม / ซื้อตามกรอบ","entry":37.4,"stop":35.5,"target":41.5,"rrRatio":2.16,"iaaTarget":44.92,"timeMachineWinPct":48.5,"note":"รอจังหวะย่อใกล้แนวรับหรือเบรกพร้อมวอลุ่ม"}
+{"symbol":"NVDA","market":"NASDAQ100","currency":"USD","action":"ทยอยสะสม / ซื้อตามกรอบ","entry":165.05,"stop":156.8,"target":181.5,"rrRatio":1.99,"iaaTarget":241.19,"timeMachineWinPct":48.5,"note":"รอจังหวะย่อใกล้แนวรับหรือเบรกพร้อมวอลุ่ม"}
 \`\`\`
-(ถ้าไม่ได้ถามเจาะจงหุ้นรายตัว ไม่ต้องใส่บล็อก tradeplan)
+(ระบุ symbol, market ("SP500"|"NASDAQ100"|"HK"|"CHINA"|"DR") และ currency ("USD"|"HKD"|"CNY"|"THB") ให้ตรงกับหุ้นนั้นๆ; ถ้าไม่ได้ถามเจาะจงหุ้นรายตัว ไม่ต้องใส่บล็อก tradeplan)
 5. ปิดท้ายสั้นๆ ว่าข้อมูลนี้เพื่อการศึกษาประกอบการตัดสินใจ มิใช่คำแนะนำการลงทุน
 
-=== LIVE 360° MARKET & PORTFOLIO CONTEXT ===
+=== LIVE 360° GLOBAL MARKET & PORTFOLIO CONTEXT ===
 ${liveContextMarkdown}
-=============================================`;
+==================================================`;
 
   const contents = messages.slice(-10).map((m) => ({
     role: m.role === "assistant" ? ("model" as const) : ("user" as const),

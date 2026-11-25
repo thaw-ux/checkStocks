@@ -15,11 +15,12 @@ import type { ChatMessage, TradePlanCardData } from "@/lib/types";
 import { useAppStore } from "@/store/useAppStore";
 
 const QUICK_PROMPTS = [
-  "วิเคราะห์หุ้น PTT สรุปฟันธงบรรทัดแรกพร้อมกรอบแผนเทรดและผล Time Machine",
-  "สแกนหุ้น SET50 ที่เข้าเกณฑ์ Breakout และ Pullback วันนี้ให้หน่อย",
-  "สรุปพอร์ตจำลองรายสัปดาห์ 360° สัปดาห์นี้ มีตัวไหนเด่นบ้าง?",
+  "เช็กแนวรับ-แนวต้านดัชนี S&P 500 (^GSPC) และ Nasdaq 100 (^NDX) ทั้ง Day และ Week",
+  "วิเคราะห์หุ้น NVDA (Nasdaq 100) พร้อมแนวรับ S1/S2 แนวต้าน R1/R2 และ Time Machine",
+  "ดูแนวรับ-แนวต้านหุ้นฮ่องกง 0700.HK (Tencent) กับ 1211.HK (BYD) ตัวไหนชิดแนวรับกว่า?",
+  "วิเคราะห์หุ้นจีน A-Share 600519.SS (Moutai) และ BABA (ADR) เทียบกันให้หน่อย",
+  "วิเคราะห์ DR หุ้นนอก NVDA80 กับ TENCENT80 และสแกนหุ้น Nasdaq 100 ชิดแนวรับวันนี้",
   "ช่วยตรวจความเสี่ยงพอร์ต Paper Trade ของฉันหน่อย",
-  "วิเคราะห์ CPALL เป้า IAA โบรกเกอร์กับแนวรับแนวต้านตอนนี้เป็นไง?",
 ];
 
 function extractTradePlan(content: string): {
@@ -101,6 +102,7 @@ export function ChatTab() {
   const {
     paperTrades,
     activeSymbol,
+    activeMarket,
     modelSettings,
     jumpToTimeMachine,
     quickAddPlanToPaperTrade,
@@ -111,7 +113,7 @@ export function ChatTab() {
       id: "welcome",
       role: "assistant",
       content:
-        "**ฟันธง:** พร้อมช่วยวิเคราะห์หุ้นไทย 360° แบบเรียลไทม์ครับ — พิมพ์ชื่อหุ้นไทยตัวไหนก็ได้ (เช่น `PTT`, `BDMS`, `CPALL`, `AAI`) ระบบจะดึงราคาสด, เป้า IAA, กรอบแนวรับ-ต้าน และจำลอง Time Machine 10,000 รอบมาฟันธงให้ทันที!\n\nนอกจากนี้คุณยังถามได้อีก:\n- สแกนหุ้น SET50 สาย Breakout / Pullback วันนี้\n- สรุปพอร์ตจำลองรายสัปดาห์ 360° (5 มิติ)\n- ให้ช่วยตรวจความเสี่ยงพอร์ต Paper Trade ส่วนตัวของคุณ",
+        "**ฟันธง:** พร้อมช่วยวิเคราะห์หุ้นต่างประเทศ 5 ตลาดหลักแบบเรียลไทม์ครับ — พิมพ์ชื่อหุ้น **สหรัฐฯ S&P 500 / Nasdaq 100 (`NVDA`, `AAPL`, `TSLA`, `^GSPC`)**, **ฮ่องกง HKEX (`0700.HK`, `9988.HK`, `1211.HK`, `0005.HK`, `^HSI`)**, **จีน A-Share / ADR (`600519.SS`, `300750.SZ`, `BABA`, `PDD`)**, หรือ **DR หุ้นนอก (`NVDA80`, `TENCENT80`, `NDX01`)** ระบบจะดึงราคาสด, เป้า Consensus, กรอบแนวรับ-ต้าน Smart Confluence (Day/Week) และจำลอง Time Machine 10,000 รอบมาฟันธงให้ทันที!\n\nนอกจากนี้คุณยังถามได้อีก:\n- สแกนหุ้น Breakout / Pullback / ชิดแนวรับ S1 ของ S&P 500, Nasdaq 100, ฮ่องกง, จีน หรือ DR\n- สรุปพอร์ตจำลองรายสัปดาห์ 360° (5 มิติ) ของแต่ละตลาด\n- ให้ช่วยตรวจความเสี่ยงพอร์ต Paper Trade ส่วนตัวของคุณ",
       createdAt: new Date().toISOString(),
     },
   ]);
@@ -159,6 +161,7 @@ export function ChatTab() {
           messages: historyForApi,
           paperTrades,
           activeSymbol,
+          activeMarket,
           model: modelSettings.proModel,
         }),
       });
@@ -211,13 +214,13 @@ export function ChatTab() {
           </div>
           <div>
             <div className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
-              AI Chat Bot 360° หุ้นไทย
+              AI Chat Bot 360° (สหรัฐฯ · ฮ่องกง · จีน · DR)
               <span className="text-[10px] px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-500 border border-sky-500/30 font-semibold">
                 {modelSettings.proModel}
               </span>
             </div>
             <div className="text-[11px] text-slate-500">
-              เชื่อมต่อข้อมูลสด 360° (ราคา · เป้า IAA · Time Machine 10,000 รอบ · สแกน SET50 · พอร์ต Paper Trade {paperTrades.length} รายการ)
+              เชื่อมต่อข้อมูลสด 5 ตลาดต่างประเทศ (ราคา · เป้า Consensus · Smart Confluence S/R · Time Machine 10,000 รอบ · Paper Trade {paperTrades.length} รายการ)
             </div>
           </div>
         </div>
@@ -293,7 +296,7 @@ export function ChatTab() {
                 ) : (
                   <div className="flex items-center gap-2 text-xs text-slate-400">
                     <Loader2 className="h-4 w-4 animate-spin text-sky-400" />
-                    กำลังดึงราคาสด เป้า IAA และรัน Time Machine 10,000 รอบให้ Gemini Pro วิเคราะห์...
+                    กำลังดึงราคาสด เป้า Consensus และรัน Time Machine 10,000 รอบให้ Gemini Pro วิเคราะห์...
                   </div>
                 )}
 
@@ -304,6 +307,7 @@ export function ChatTab() {
                       const p = (tradePlan || msg.tradePlan)!;
                       jumpToTimeMachine({
                         symbol: p.symbol,
+                        market: p.market,
                         entry: p.entry,
                         stop: p.stop,
                         target: p.target,
@@ -348,7 +352,7 @@ export function ChatTab() {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           disabled={streaming}
-          placeholder="พิมพ์ชื่อหุ้นไทย เช่น 'วิเคราะห์ BDMS' หรือ 'หุ้น Breakout วันนี้' หรือ 'ตรวจพอร์ต Paper Trade'..."
+          placeholder="พิมพ์ชื่อหุ้นสหรัฐฯ/ฮ่องกง/จีน/DR เช่น 'วิเคราะห์ NVDA', '0700.HK เทนเซ็นต์', '600519.SS', 'NVDA80' หรือ 'สแกนฮ่องกง Breakout'..."
           className="flex-1 rounded-xl bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 px-3.5 py-2.5 text-sm outline-none focus:border-sky-400"
         />
         <button

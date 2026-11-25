@@ -13,10 +13,13 @@ import {
   TrendingUp,
 } from "lucide-react";
 import { IaaStackedBarChart } from "@/components/charts/AnalyticsCharts";
+import { MarketSwitcher } from "@/components/common/MarketSwitcher";
 import { SentimentBadge, SkeletonCard } from "@/components/common/UiPrimitives";
+import { formatPrice, MARKET_CONFIGS } from "@/lib/markets";
 import type {
   BrokerReportItem,
   IaaConsensusSummary,
+  MarketId,
   NewsPickItem,
   TechnicalSetupItem,
 } from "@/lib/types";
@@ -31,12 +34,19 @@ interface IaaRow extends IaaConsensusSummary {
 }
 
 export function ScannerTab() {
-  const { jumpToStock, jumpToTimeMachine, quickAddPlanToPaperTrade, theme, isCardView } =
-    useAppStore();
+  const {
+    activeMarket,
+    setActiveMarket,
+    jumpToStock,
+    jumpToTimeMachine,
+    quickAddPlanToPaperTrade,
+    theme,
+    isCardView,
+  } = useAppStore();
 
   const [mode, setMode] = useState<ScannerMode>("iaa");
 
-  // Mode 1: IAA Consensus
+  // Mode 1: Analyst Consensus
   const [iaaItems, setIaaItems] = useState<IaaRow[]>([]);
   const [iaaSectors, setIaaSectors] = useState<string[]>([]);
   const [iaaMeta, setIaaMeta] = useState({ count: 0, elapsedMs: 0 });
@@ -47,7 +57,7 @@ export function ScannerTab() {
   const [iaaMinBrokers, setIaaMinBrokers] = useState(3);
   const [iaaHighCoverage, setIaaHighCoverage] = useState(false);
 
-  // Mode 2: Daily Broker Research
+  // Mode 2: Daily Broker / Wall Street Research
   const [reports, setReports] = useState<BrokerReportItem[]>([]);
   const [brokers, setBrokers] = useState<string[]>([]);
   const [researchMeta, setResearchMeta] = useState({ count: 0, brokerCount: 0, elapsedMs: 0 });
@@ -56,23 +66,29 @@ export function ScannerTab() {
   const [selectedBroker, setSelectedBroker] = useState("ALL");
   const [buyOnly, setBuyOnly] = useState(false);
 
-  // Mode 3: SET50 Technical Setup Scanner
+  // Mode 3: Technical & S/R Setup Scanner
   const [setups, setSetups] = useState<TechnicalSetupItem[]>([]);
-  const [techMeta, setTechMeta] = useState({ scannedCount: 0, elapsedMs: 0 });
+  const [techMeta, setTechMeta] = useState({ scannedCount: 0, elapsedMs: 0, universe: "" });
   const [techLoading, setTechLoading] = useState(false);
+  const [proximityPct, setProximityPct] = useState(3);
   const [setupFilter, setSetupFilter] = useState<
-    "ALL" | "Breakout + Volume" | "Pullback > EMA200" | "Oversold Rebound"
+    | "ALL"
+    | "Breakout + Volume"
+    | "Pullback > EMA200"
+    | "Near Support (S1)"
+    | "Near Resistance (R1)"
+    | "Oversold Rebound"
   >("ALL");
 
-  // Mode 4: Daily News & Broker Pick Scanner
+  // Mode 4: Daily News & Research Mentions
   const [newsPicks, setNewsPicks] = useState<NewsPickItem[]>([]);
   const [newsLoading, setNewsLoading] = useState(false);
   const [newsElapsed, setNewsElapsed] = useState(0);
 
-  const loadIaa = useCallback(async (refresh = false) => {
+  const loadIaa = useCallback(async (mkt: MarketId, refresh = false) => {
     setIaaLoading(true);
     try {
-      const res = await fetch(`/api/scanner/iaa${refresh ? "?refresh=1" : ""}`);
+      const res = await fetch(`/api/scanner/iaa?market=${mkt}${refresh ? "&refresh=1" : ""}`);
       const json = (await res.json()) as {
         items?: IaaRow[];
         sectors?: string[];
@@ -82,6 +98,7 @@ export function ScannerTab() {
       if (res.ok && json.items) {
         setIaaItems(json.items);
         setIaaSectors(json.sectors ?? []);
+        setIaaSector("ALL");
         setIaaMeta({ count: json.count ?? json.items.length, elapsedMs: json.elapsedMs ?? 0 });
       }
     } finally {
@@ -89,10 +106,10 @@ export function ScannerTab() {
     }
   }, []);
 
-  const loadResearch = useCallback(async (refresh = false) => {
+  const loadResearch = useCallback(async (mkt: MarketId, refresh = false) => {
     setResearchLoading(true);
     try {
-      const res = await fetch(`/api/scanner/research${refresh ? "?refresh=1" : ""}`);
+      const res = await fetch(`/api/scanner/research?market=${mkt}${refresh ? "&refresh=1" : ""}`);
       const json = (await res.json()) as {
         reports?: BrokerReportItem[];
         brokers?: string[];
@@ -103,6 +120,7 @@ export function ScannerTab() {
       if (res.ok && json.reports) {
         setReports(json.reports);
         setBrokers(json.brokers ?? []);
+        setSelectedBroker("ALL");
         setResearchMeta({
           count: json.count ?? json.reports.length,
           brokerCount: json.brokerCount ?? 0,
@@ -114,20 +132,24 @@ export function ScannerTab() {
     }
   }, []);
 
-  const loadTechnical = useCallback(async (refresh = false) => {
+  const loadTechnical = useCallback(async (mkt: MarketId, prox: number, refresh = false) => {
     setTechLoading(true);
     try {
-      const res = await fetch(`/api/scanner/technical${refresh ? "?refresh=1" : ""}`);
+      const res = await fetch(
+        `/api/scanner/technical?market=${mkt}&proximity=${prox}${refresh ? "&refresh=1" : ""}`
+      );
       const json = (await res.json()) as {
         setups?: TechnicalSetupItem[];
         scannedCount?: number;
         elapsedMs?: number;
+        universe?: string;
       };
       if (res.ok && json.setups) {
         setSetups(json.setups);
         setTechMeta({
-          scannedCount: json.scannedCount ?? 50,
+          scannedCount: json.scannedCount ?? 0,
           elapsedMs: json.elapsedMs ?? 0,
+          universe: json.universe ?? MARKET_CONFIGS[mkt].label,
         });
       }
     } finally {
@@ -135,10 +157,10 @@ export function ScannerTab() {
     }
   }, []);
 
-  const loadNewsPicks = useCallback(async (refresh = false) => {
+  const loadNewsPicks = useCallback(async (mkt: MarketId, refresh = false) => {
     setNewsLoading(true);
     try {
-      const res = await fetch(`/api/scanner/news-picks${refresh ? "?refresh=1" : ""}`);
+      const res = await fetch(`/api/scanner/news-picks?market=${mkt}${refresh ? "&refresh=1" : ""}`);
       const json = (await res.json()) as { picks?: NewsPickItem[]; elapsedMs?: number };
       if (res.ok && json.picks) {
         setNewsPicks(json.picks);
@@ -149,22 +171,13 @@ export function ScannerTab() {
     }
   }, []);
 
+  // Reload active scanner mode whenever mode, activeMarket, or proximity changes
   useEffect(() => {
-    if (mode === "iaa" && iaaItems.length === 0) void loadIaa(false);
-    if (mode === "research" && reports.length === 0) void loadResearch(false);
-    if (mode === "technical" && setups.length === 0) void loadTechnical(false);
-    if (mode === "news" && newsPicks.length === 0) void loadNewsPicks(false);
-  }, [
-    mode,
-    iaaItems.length,
-    reports.length,
-    setups.length,
-    newsPicks.length,
-    loadIaa,
-    loadResearch,
-    loadTechnical,
-    loadNewsPicks,
-  ]);
+    if (mode === "iaa") void loadIaa(activeMarket, false);
+    if (mode === "research") void loadResearch(activeMarket, false);
+    if (mode === "technical") void loadTechnical(activeMarket, proximityPct, false);
+    if (mode === "news") void loadNewsPicks(activeMarket, false);
+  }, [mode, activeMarket, proximityPct, loadIaa, loadResearch, loadTechnical, loadNewsPicks]);
 
   const filteredIaa = useMemo(() => {
     const minCov = iaaHighCoverage ? Math.max(5, iaaMinBrokers) : iaaMinBrokers;
@@ -202,16 +215,38 @@ export function ScannerTab() {
     return setups.filter((s) => s.setupType === setupFilter);
   }, [setups, setupFilter]);
 
+  const mktCfg = MARKET_CONFIGS[activeMarket];
+
   const modeTabs: { id: ScannerMode; label: string; icon: React.ReactNode }[] = [
-    { id: "iaa", label: "มติพื้นฐาน IAA ทั้งตลาด", icon: <FileSpreadsheet className="h-3.5 w-3.5" /> },
-    { id: "research", label: "บทวิเคราะห์ออกใหม่รายวัน", icon: <TrendingUp className="h-3.5 w-3.5" /> },
-    { id: "technical", label: "สแกนกราฟ SET50 (Breakout/Pullback)", icon: <Activity className="h-3.5 w-3.5" /> },
-    { id: "news", label: "สแกนข่าวโพยโบรกฯ รายวัน", icon: <Newspaper className="h-3.5 w-3.5" /> },
+    {
+      id: "iaa",
+      label: "Analyst Consensus ทั้งตลาด",
+      icon: <FileSpreadsheet className="h-3.5 w-3.5" />,
+    },
+    {
+      id: "research",
+      label: "Wall Street / โบรกฯ รายวัน",
+      icon: <TrendingUp className="h-3.5 w-3.5" />,
+    },
+    {
+      id: "technical",
+      label: `สแกนกราฟ & แนวรับ-ต้าน ${mktCfg.shortLabel}`,
+      icon: <Activity className="h-3.5 w-3.5" />,
+    },
+    {
+      id: "news",
+      label: "สแกนข่าวหุ้นเด่นรายวัน",
+      icon: <Newspaper className="h-3.5 w-3.5" />,
+    },
   ];
 
   return (
     <div className="space-y-5">
-      {/* 4-Mode Switcher */}
+      {/* Market Switcher + 4-Mode Switcher */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <MarketSwitcher value={activeMarket} onChange={setActiveMarket} />
+      </div>
+
       <div className="flex flex-wrap gap-2">
         {modeTabs.map((t) => (
           <button
@@ -230,23 +265,23 @@ export function ScannerTab() {
         ))}
       </div>
 
-      {/* MODE 1: FULL-MARKET IAA CONSENSUS */}
+      {/* MODE 1: CONSENSUS */}
       {mode === "iaa" && (
         <div className="space-y-4">
           <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-5 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <h2 className="text-sm font-bold text-slate-900 dark:text-white">
-                  ตารางจัดอันดับ IAA / Analyst Consensus ทั้งตลาด SET ({iaaMeta.count} หุ้น ·{" "}
+                  {mktCfg.flag} ตารางจัดอันดับ Analyst Consensus — {mktCfg.label} ({iaaMeta.count} หุ้น ·{" "}
                   {(iaaMeta.elapsedMs / 1000).toFixed(2)} วินาที)
                 </h2>
                 <p className="text-xs text-slate-500">
-                  เปรียบเทียบราคาเป้าหมาย 12 เดือน Upside % และสัดส่วนโบรกเกอร์แนะนำซื้อในตารางเดียว
+                  เปรียบเทียบราคาเป้าหมาย 12 เดือน Upside % และสัดส่วนนักวิเคราะห์แนะนำซื้อในตารางเดียว
                 </p>
               </div>
               <button
                 type="button"
-                onClick={() => void loadIaa(true)}
+                onClick={() => void loadIaa(activeMarket, true)}
                 disabled={iaaLoading}
                 className="px-3 py-1.5 rounded-xl border border-slate-300 dark:border-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 hover:border-sky-400 cursor-pointer"
               >
@@ -255,7 +290,6 @@ export function ScannerTab() {
               </button>
             </div>
 
-            {/* Filters */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5 text-xs">
               <div className="relative">
                 <Search className="h-3.5 w-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -273,7 +307,7 @@ export function ScannerTab() {
                 onChange={(e) => setIaaSort(e.target.value as typeof iaaSort)}
                 className="rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 px-3 py-2 outline-none"
               >
-                <option value="buyCount">เรียง: โบรกฯ แนะนำซื้อสูงสุด</option>
+                <option value="buyCount">เรียง: แนะนำซื้อสูงสุด</option>
                 <option value="upside">เรียง: Upside % สูงสุด</option>
                 <option value="buyRatio">เรียง: สัดส่วนแนะซื้อ % สูงสุด</option>
               </select>
@@ -292,11 +326,11 @@ export function ScannerTab() {
               </select>
 
               <div className="flex items-center gap-2 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 px-3 py-1.5">
-                <span className="text-slate-500 whitespace-nowrap">โบรกฯ ≥ {iaaMinBrokers}</span>
+                <span className="text-slate-500 whitespace-nowrap">นักวิเคราะห์ ≥ {iaaMinBrokers}</span>
                 <input
                   type="range"
                   min={1}
-                  max={15}
+                  max={25}
                   value={iaaMinBrokers}
                   onChange={(e) => setIaaMinBrokers(Number(e.target.value))}
                   className="w-full accent-sky-500"
@@ -310,18 +344,17 @@ export function ScannerTab() {
                   onChange={(e) => setIaaHighCoverage(e.target.checked)}
                   className="accent-sky-500"
                 />
-                <span>Coverage ≥ 5 โบรกฯ</span>
+                <span>Coverage ≥ 5 ราย</span>
               </label>
             </div>
 
-            {/* Quick-jump Top 12 */}
             {filteredIaa.length > 0 && (
               <div className="flex flex-wrap gap-1.5">
                 {filteredIaa.slice(0, 12).map((item) => (
                   <button
                     key={item.symbol}
                     type="button"
-                    onClick={() => jumpToStock(item.symbol)}
+                    onClick={() => jumpToStock(item.symbol, "chart", activeMarket)}
                     className="px-2.5 py-1 rounded-lg text-xs font-bold bg-slate-100 dark:bg-slate-800 hover:bg-sky-500 hover:text-slate-950 transition cursor-pointer tabular-nums"
                   >
                     {item.symbol}{" "}
@@ -333,14 +366,14 @@ export function ScannerTab() {
               </div>
             )}
 
-            {iaaLoading && iaaItems.length === 0 ? (
+            {iaaLoading ? (
               <SkeletonCard lines={6} />
             ) : isCardView ? (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 {filteredIaa.slice(0, 50).map((item) => (
                   <div
                     key={item.symbol}
-                    onClick={() => jumpToStock(item.symbol)}
+                    onClick={() => jumpToStock(item.symbol, "chart", activeMarket)}
                     className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 p-3 cursor-pointer hover:border-sky-400"
                   >
                     <div className="flex justify-between items-center">
@@ -353,10 +386,10 @@ export function ScannerTab() {
                         Upside {item.upsidePct !== null ? `${item.upsidePct >= 0 ? "+" : ""}${item.upsidePct}%` : "-"}
                       </span>
                     </div>
-                    <div className="text-[11px] text-slate-500 truncate">{item.sector}</div>
+                    <div className="text-[11px] text-slate-500 truncate">{item.companyName}</div>
                     <div className="flex justify-between text-xs mt-2 tabular-nums">
-                      <span>ราคา {item.currentPrice.toFixed(2)} บ.</span>
-                      <span>เป้าเฉลี่ย {item.avgTargetPrice?.toFixed(2) ?? "-"} บ.</span>
+                      <span>{formatPrice(item.currentPrice, item.currency)}</span>
+                      <span>เป้า {formatPrice(item.avgTargetPrice, item.currency)}</span>
                       <span className="text-emerald-500 font-semibold">
                         ซื้อ {item.buyCount}/{item.totalBrokers} ({item.buyRatioPct ?? 0}%)
                       </span>
@@ -370,7 +403,7 @@ export function ScannerTab() {
                   <thead className="sticky top-0 bg-white dark:bg-slate-900 z-10 border-b border-slate-200 dark:border-slate-800 text-slate-500">
                     <tr>
                       <th className="py-2 pr-3">หุ้น</th>
-                      <th className="py-2 px-3">หมวดธุรกิจ</th>
+                      <th className="py-2 px-3">บริษัท / หมวดธุรกิจ</th>
                       <th className="py-2 px-3 text-right">ราคาล่าสุด</th>
                       <th className="py-2 px-3 text-right">เป้าเฉลี่ย</th>
                       <th className="py-2 px-3 text-right">Upside</th>
@@ -382,18 +415,23 @@ export function ScannerTab() {
                     {filteredIaa.slice(0, 80).map((item) => (
                       <tr
                         key={item.symbol}
-                        onClick={() => jumpToStock(item.symbol)}
+                        onClick={() => jumpToStock(item.symbol, "chart", activeMarket)}
                         className="hover:bg-sky-500/5 cursor-pointer transition"
                       >
-                        <td className="py-2.5 pr-3 font-bold text-sky-500">{item.symbol}</td>
+                        <td className="py-2.5 pr-3 font-bold text-sky-500 whitespace-nowrap">
+                          {item.symbol}
+                        </td>
                         <td className="py-2.5 px-3 text-slate-500 dark:text-slate-400">
-                          {item.sector}
+                          <div className="font-medium text-slate-800 dark:text-slate-200 truncate max-w-[220px]">
+                            {item.companyName}
+                          </div>
+                          <div className="text-[10px]">{item.sector}</div>
                         </td>
-                        <td className="py-2.5 px-3 text-right font-semibold">
-                          {item.currentPrice.toFixed(2)}
+                        <td className="py-2.5 px-3 text-right font-semibold whitespace-nowrap">
+                          {formatPrice(item.currentPrice, item.currency)}
                         </td>
-                        <td className="py-2.5 px-3 text-right font-bold text-amber-500">
-                          {item.avgTargetPrice?.toFixed(2) ?? "-"}
+                        <td className="py-2.5 px-3 text-right font-bold text-amber-500 whitespace-nowrap">
+                          {formatPrice(item.avgTargetPrice, item.currency)}
                         </td>
                         <td
                           className={`py-2.5 px-3 text-right font-extrabold ${
@@ -404,10 +442,10 @@ export function ScannerTab() {
                             ? `${item.upsidePct >= 0 ? "+" : ""}${item.upsidePct.toFixed(1)}%`
                             : "-"}
                         </td>
-                        <td className="py-2.5 px-3 text-right font-semibold text-emerald-500">
+                        <td className="py-2.5 px-3 text-right font-semibold text-emerald-500 whitespace-nowrap">
                           {item.buyCount}/{item.totalBrokers} ({item.buyRatioPct ?? 0}%)
                         </td>
-                        <td className="py-2.5 pl-3 text-right text-slate-500">
+                        <td className="py-2.5 pl-3 text-right text-slate-500 whitespace-nowrap">
                           {item.pe ? `${item.pe.toFixed(1)}x` : "-"} ·{" "}
                           {item.dividendYield ? `${item.dividendYield.toFixed(1)}%` : "-"}
                         </td>
@@ -422,27 +460,27 @@ export function ScannerTab() {
           <IaaStackedBarChart
             items={filteredIaa}
             theme={theme}
-            onSelectSymbol={(sym) => jumpToStock(sym)}
+            onSelectSymbol={(sym) => jumpToStock(sym, "chart", activeMarket)}
           />
         </div>
       )}
 
-      {/* MODE 2: DAILY NEW BROKER RESEARCH (20+ BROKERS) */}
+      {/* MODE 2: DAILY BROKER / WALL STREET RESEARCH */}
       {mode === "research" && (
         <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-5 space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <h2 className="text-sm font-bold text-slate-900 dark:text-white">
-                บทวิเคราะห์และราคาเป้าหมายออกใหม่รายวัน ({researchMeta.count} ฉบับ ·{" "}
-                {researchMeta.brokerCount} โบรกเกอร์/แหล่งวิจัย)
+                {mktCfg.flag} บทวิเคราะห์และราคาเป้าหมายออกใหม่ — {mktCfg.label} ({researchMeta.count} รายการ ·{" "}
+                {researchMeta.brokerCount} สถาบัน/โบรกเกอร์)
               </h2>
               <p className="text-xs text-slate-500">
-                รวมบทวิเคราะห์และโพยเป้าจากโบรกเกอร์ชั้นนำไทยในตารางเดียว รู้ทันทีค่ายไหนเชียร์ตัวไหน Upside กี่ %
+                รวมบทวิเคราะห์และปรับเป้าจากโบรกเกอร์ชั้นนำ รู้ทันทีค่ายไหนเชียร์ตัวไหน Upside กี่ %
               </p>
             </div>
             <button
               type="button"
-              onClick={() => void loadResearch(true)}
+              onClick={() => void loadResearch(activeMarket, true)}
               disabled={researchLoading}
               className="px-3 py-1.5 rounded-xl border border-slate-300 dark:border-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 hover:border-sky-400 cursor-pointer"
             >
@@ -483,68 +521,12 @@ export function ScannerTab() {
                 onChange={(e) => setBuyOnly(e.target.checked)}
                 className="accent-emerald-500"
               />
-              <span>เฉพาะแนะนำ &quot;ซื้อ / Outperform&quot;</span>
+              <span>เฉพาะแนะนำ &quot;ซื้อ / Outperform / Overweight&quot;</span>
             </label>
           </div>
 
-          {researchLoading && reports.length === 0 ? (
+          {researchLoading ? (
             <SkeletonCard lines={6} />
-          ) : isCardView ? (
-            <div className="space-y-2.5">
-              {filteredReports.slice(0, 40).map((r) => (
-                <div
-                  key={r.id}
-                  className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 p-3 space-y-1.5"
-                >
-                  <div className="flex items-center justify-between">
-                    <button
-                      type="button"
-                      onClick={() => jumpToStock(r.symbol)}
-                      className="font-extrabold text-sm text-sky-500 cursor-pointer"
-                    >
-                      {r.symbol}
-                    </button>
-                    <SentimentBadge
-                      bias={
-                        r.ratingNormalized === "Buy"
-                          ? "positive"
-                          : r.ratingNormalized === "Sell"
-                            ? "negative"
-                            : "neutral"
-                      }
-                      label={r.rating}
-                    />
-                  </div>
-                  <div className="text-[11px] font-semibold text-amber-500">
-                    {r.broker} · {r.reportDate}
-                  </div>
-                  <div className="flex gap-3 text-xs tabular-nums">
-                    <span>เป้า: {r.targetPrice ? `${r.targetPrice.toFixed(2)} บ.` : "-"}</span>
-                    <span>ล่าสุด: {r.currentPrice ? `${r.currentPrice.toFixed(2)} บ.` : "-"}</span>
-                    {r.upsidePct !== null && (
-                      <span
-                        className={
-                          r.upsidePct >= 0
-                            ? "text-emerald-500 font-bold"
-                            : "text-rose-500 font-bold"
-                        }
-                      >
-                        Upside {r.upsidePct >= 0 ? "+" : ""}
-                        {r.upsidePct.toFixed(1)}%
-                      </span>
-                    )}
-                  </div>
-                  <a
-                    href={r.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-xs text-slate-600 dark:text-slate-300 hover:text-sky-400 inline-flex items-center gap-1"
-                  >
-                    {r.headline} <ExternalLink className="h-3 w-3 shrink-0" />
-                  </a>
-                </div>
-              ))}
-            </div>
           ) : (
             <div className="overflow-x-auto max-h-[520px] overflow-y-auto">
               <table className="w-full text-xs text-left">
@@ -553,7 +535,7 @@ export function ScannerTab() {
                     <th className="py-2 pr-3">หุ้น</th>
                     <th className="py-2 px-3">โบรกเกอร์</th>
                     <th className="py-2 px-3">คำแนะนำ</th>
-                    <th className="py-2 px-3 text-right">เป้า (บ.)</th>
+                    <th className="py-2 px-3 text-right">เป้า</th>
                     <th className="py-2 px-3 text-right">ล่าสุด</th>
                     <th className="py-2 px-3 text-right">Upside</th>
                     <th className="py-2 px-3">วันที่</th>
@@ -566,7 +548,7 @@ export function ScannerTab() {
                       <td className="py-2.5 pr-3">
                         <button
                           type="button"
-                          onClick={() => jumpToStock(r.symbol)}
+                          onClick={() => jumpToStock(r.symbol, "chart", activeMarket)}
                           className="font-bold text-sky-500 hover:underline cursor-pointer"
                         >
                           {r.symbol}
@@ -585,11 +567,11 @@ export function ScannerTab() {
                           label={r.rating}
                         />
                       </td>
-                      <td className="py-2.5 px-3 text-right tabular-nums font-bold text-amber-500">
-                        {r.targetPrice ? r.targetPrice.toFixed(2) : "-"}
+                      <td className="py-2.5 px-3 text-right tabular-nums font-bold text-amber-500 whitespace-nowrap">
+                        {formatPrice(r.targetPrice, r.currency)}
                       </td>
-                      <td className="py-2.5 px-3 text-right tabular-nums">
-                        {r.currentPrice ? r.currentPrice.toFixed(2) : "-"}
+                      <td className="py-2.5 px-3 text-right tabular-nums whitespace-nowrap">
+                        {formatPrice(r.currentPrice, r.currency)}
                       </td>
                       <td
                         className={`py-2.5 px-3 text-right tabular-nums font-bold ${
@@ -623,28 +605,44 @@ export function ScannerTab() {
         </div>
       )}
 
-      {/* MODE 3: SET50 TECHNICAL SETUP SCANNER */}
+      {/* MODE 3: TECHNICAL & S/R SETUP SCANNER */}
       {mode === "technical" && (
         <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-5 space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <h2 className="text-sm font-bold text-slate-900 dark:text-white">
-                SET50 TECHNICAL SETUP SCANNER · หุ้นใหญ่สภาพคล่องสูงเข้าเกณฑ์พร้อมแผน Entry / Stop / Target
+                {mktCfg.flag} TECHNICAL & S/R SETUP SCANNER — {mktCfg.label}
               </h2>
               <p className="text-xs text-slate-500">
-                สแกนหุ้น SET50 จำนวน {techMeta.scannedCount} ตัว พบ {setups.length} Setup (
-                {(techMeta.elapsedMs / 1000).toFixed(2)} วินาที) · กดส่งเข้า Time Machine 10,000 รอบได้ทันที
+                สแกนหุ้น {techMeta.scannedCount} ตัว พบ {setups.length} Setup (
+                {(techMeta.elapsedMs / 1000).toFixed(2)} วินาที) · แสดงแนวรับ S1 / แนวต้าน R1 + ระยะห่าง %
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() => void loadTechnical(true)}
-              disabled={techLoading}
-              className="px-3 py-1.5 rounded-xl border border-slate-300 dark:border-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 hover:border-sky-400 cursor-pointer"
-            >
-              <RefreshCw className={`h-3.5 w-3.5 ${techLoading ? "animate-spin" : ""}`} />
-              สแกนสดใหม่
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center gap-2 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-xs">
+                <span className="text-slate-500 whitespace-nowrap">
+                  ระยะชิดแนวรับ/ต้าน ≤ <strong>{proximityPct}%</strong>
+                </span>
+                <input
+                  type="range"
+                  min={1}
+                  max={6}
+                  step={0.5}
+                  value={proximityPct}
+                  onChange={(e) => setProximityPct(Number(e.target.value))}
+                  className="w-24 accent-sky-500"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => void loadTechnical(activeMarket, proximityPct, true)}
+                disabled={techLoading}
+                className="px-3 py-1.5 rounded-xl border border-slate-300 dark:border-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 hover:border-sky-400 cursor-pointer"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${techLoading ? "animate-spin" : ""}`} />
+                สแกนสดใหม่
+              </button>
+            </div>
           </div>
 
           <div className="flex flex-wrap gap-1.5">
@@ -653,15 +651,23 @@ export function ScannerTab() {
                 ["ALL", `ทั้งหมด (${setups.length})`],
                 [
                   "Breakout + Volume",
-                  `Breakout + Volume เข้า (${setups.filter((s) => s.setupType === "Breakout + Volume").length})`,
+                  `Breakout + Vol (${setups.filter((s) => s.setupType === "Breakout + Volume").length})`,
                 ],
                 [
                   "Pullback > EMA200",
-                  `Pullback บนขาขึ้น >EMA200 (${setups.filter((s) => s.setupType === "Pullback > EMA200").length})`,
+                  `Pullback >EMA200 (${setups.filter((s) => s.setupType === "Pullback > EMA200").length})`,
+                ],
+                [
+                  "Near Support (S1)",
+                  `🎯 ชิดแนวรับ S1 ≤${proximityPct}% (${setups.filter((s) => s.setupType === "Near Support (S1)").length})`,
+                ],
+                [
+                  "Near Resistance (R1)",
+                  `🚀 จ่อเบรกต้าน R1 ≤${proximityPct}% (${setups.filter((s) => s.setupType === "Near Resistance (R1)").length})`,
                 ],
                 [
                   "Oversold Rebound",
-                  `Oversold ลุ้นรีบาวด์ (${setups.filter((s) => s.setupType === "Oversold Rebound").length})`,
+                  `Oversold (${setups.filter((s) => s.setupType === "Oversold Rebound").length})`,
                 ],
               ] as const
             ).map(([val, label]) => (
@@ -680,84 +686,11 @@ export function ScannerTab() {
             ))}
           </div>
 
-          {techLoading && setups.length === 0 ? (
+          {techLoading ? (
             <SkeletonCard lines={6} />
           ) : filteredSetups.length === 0 ? (
             <div className="rounded-xl bg-slate-50 dark:bg-slate-950 p-6 text-center text-xs text-slate-500">
-              ยังไม่พบหุ้น SET50 ที่เข้าเงื่อนไขรูปแบบนี้ในรอบล่าสุด
-            </div>
-          ) : isCardView ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {filteredSetups.map((s) => (
-                <div
-                  key={`${s.symbol}-${s.setupType}`}
-                  className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 p-3.5 space-y-2"
-                >
-                  <div className="flex items-center justify-between">
-                    <button
-                      type="button"
-                      onClick={() => jumpToStock(s.symbol)}
-                      className="text-base font-extrabold text-sky-500 cursor-pointer"
-                    >
-                      {s.symbol}
-                    </button>
-                    <SentimentBadge
-                      bias={
-                        s.setupType === "Breakout + Volume"
-                          ? "positive"
-                          : s.setupType === "Pullback > EMA200"
-                            ? "neutral"
-                            : "negative"
-                      }
-                      label={s.setupType}
-                    />
-                  </div>
-                  <div className="text-xs font-semibold tabular-nums">
-                    ราคา {s.price.toFixed(2)} บ. ({s.changePct1d >= 0 ? "+" : ""}
-                    {s.changePct1d}%) · R:R 1:{s.rrRatio}
-                  </div>
-                  <div className="text-xs tabular-nums text-slate-600 dark:text-slate-300">
-                    Entry <strong>{s.entry.toFixed(2)}</strong> / Stop{" "}
-                    <strong className="text-rose-500">{s.stop.toFixed(2)}</strong> / Target{" "}
-                    <strong className="text-emerald-500">{s.target.toFixed(2)}</strong>
-                  </div>
-                  <p className="text-[11px] text-slate-500">{s.reasonTh}</p>
-                  <div className="flex gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        jumpToTimeMachine({
-                          symbol: s.symbol,
-                          entry: s.entry,
-                          stop: s.stop,
-                          target: s.target,
-                          sourceLabel: s.setupType,
-                        })
-                      }
-                      className="flex-1 py-1.5 rounded-lg bg-sky-500 text-slate-950 font-bold text-xs inline-flex items-center justify-center gap-1 cursor-pointer"
-                    >
-                      <FlaskConical className="h-3.5 w-3.5" /> Time Machine
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        quickAddPlanToPaperTrade({
-                          symbol: s.symbol,
-                          action: s.setupType,
-                          entry: s.entry,
-                          stop: s.stop,
-                          target: s.target,
-                          rrRatio: s.rrRatio,
-                          note: s.reasonTh,
-                        })
-                      }
-                      className="px-3 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-500 font-bold text-xs cursor-pointer"
-                    >
-                      + Paper
-                    </button>
-                  </div>
-                </div>
-              ))}
+              ยังไม่พบหุ้นใน {mktCfg.label} ที่เข้าเงื่อนไขรูปแบบนี้ (ลองเพิ่มสไลเดอร์ระยะ % ห่างแนวรับ-ต้านดูได้ครับ)
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -767,10 +700,10 @@ export function ScannerTab() {
                     <th className="py-2 pr-3">หุ้น</th>
                     <th className="py-2 px-3">รูปแบบ Setup</th>
                     <th className="py-2 px-3 text-right">ราคาล่าสุด</th>
-                    <th className="py-2 px-3 text-right">1D %</th>
+                    <th className="py-2 px-3 text-right">แนวรับ S1 (% ห่าง)</th>
+                    <th className="py-2 px-3 text-right">แนวต้าน R1 (% ห่าง)</th>
                     <th className="py-2 px-3">Entry / Stop / Target</th>
                     <th className="py-2 px-3 text-right">R:R</th>
-                    <th className="py-2 px-3">เหตุผลกราฟ</th>
                     <th className="py-2 pl-3 text-right">ดำเนินการ</th>
                   </tr>
                 </thead>
@@ -780,34 +713,56 @@ export function ScannerTab() {
                       <td className="py-2.5 pr-3">
                         <button
                           type="button"
-                          onClick={() => jumpToStock(s.symbol)}
+                          onClick={() => jumpToStock(s.symbol, "chart", activeMarket)}
                           className="font-extrabold text-sky-500 hover:underline cursor-pointer"
                         >
                           {s.symbol}
                         </button>
+                        <div className="text-[10px] text-slate-500 truncate max-w-[130px]">
+                          {s.companyName}
+                        </div>
                       </td>
                       <td className="py-2.5 px-3 whitespace-nowrap">
                         <SentimentBadge
                           bias={
-                            s.setupType === "Breakout + Volume"
+                            s.setupType === "Breakout + Volume" || s.setupType === "Near Support (S1)"
                               ? "positive"
-                              : s.setupType === "Pullback > EMA200"
-                                ? "neutral"
-                                : "negative"
+                              : s.setupType === "Oversold Rebound"
+                                ? "negative"
+                                : "neutral"
                           }
                           label={s.setupType}
                         />
+                        <div className="text-[10px] text-slate-500 mt-0.5 max-w-[190px] truncate" title={s.reasonTh}>
+                          {s.reasonTh}
+                        </div>
                       </td>
-                      <td className="py-2.5 px-3 text-right tabular-nums font-bold">
-                        {s.price.toFixed(2)}
+                      <td className="py-2.5 px-3 text-right tabular-nums whitespace-nowrap">
+                        <div className="font-bold">{formatPrice(s.price, s.currency)}</div>
+                        <div
+                          className={`text-[10px] font-semibold ${
+                            s.changePct1d >= 0 ? "text-emerald-500" : "text-rose-500"
+                          }`}
+                        >
+                          {s.changePct1d >= 0 ? "+" : ""}
+                          {s.changePct1d.toFixed(2)}%
+                        </div>
                       </td>
-                      <td
-                        className={`py-2.5 px-3 text-right tabular-nums font-semibold ${
-                          s.changePct1d >= 0 ? "text-emerald-500" : "text-rose-500"
-                        }`}
-                      >
-                        {s.changePct1d >= 0 ? "+" : ""}
-                        {s.changePct1d.toFixed(2)}%
+                      <td className="py-2.5 px-3 text-right tabular-nums whitespace-nowrap">
+                        <div className="font-bold text-emerald-500">
+                          {formatPrice(s.s1, s.currency)}
+                        </div>
+                        <div className="text-[10px] text-slate-500">
+                          -{s.s1DistPct.toFixed(1)}% · {"★".repeat(Math.min(5, s.s1Strength))}
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-3 text-right tabular-nums whitespace-nowrap">
+                        <div className="font-bold text-rose-500">
+                          {formatPrice(s.r1, s.currency)}
+                        </div>
+                        <div className="text-[10px] text-slate-500">
+                          +{s.r1DistPct.toFixed(1)}% · {"★".repeat(Math.min(5, s.r1Strength))}
+                        </div>
                       </td>
                       <td className="py-2.5 px-3 tabular-nums whitespace-nowrap">
                         <span className="font-semibold">{s.entry.toFixed(2)}</span> /{" "}
@@ -819,9 +774,6 @@ export function ScannerTab() {
                       <td className="py-2.5 px-3 text-right tabular-nums font-bold text-amber-500">
                         1:{s.rrRatio.toFixed(2)}
                       </td>
-                      <td className="py-2.5 px-3 text-slate-500 dark:text-slate-400 max-w-xs">
-                        {s.reasonTh}
-                      </td>
                       <td className="py-2.5 pl-3 text-right whitespace-nowrap">
                         <div className="inline-flex gap-1.5">
                           <button
@@ -829,6 +781,7 @@ export function ScannerTab() {
                             onClick={() =>
                               jumpToTimeMachine({
                                 symbol: s.symbol,
+                                market: activeMarket,
                                 entry: s.entry,
                                 stop: s.stop,
                                 target: s.target,
@@ -844,6 +797,8 @@ export function ScannerTab() {
                             onClick={() =>
                               quickAddPlanToPaperTrade({
                                 symbol: s.symbol,
+                                market: activeMarket,
+                                currency: s.currency,
                                 action: s.setupType,
                                 entry: s.entry,
                                 stop: s.stop,
@@ -868,22 +823,22 @@ export function ScannerTab() {
         </div>
       )}
 
-      {/* MODE 4: DAILY NEWS & BROKER PICKS SCANNER */}
+      {/* MODE 4: NEWS PICKS */}
       {mode === "news" && (
         <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-5 space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <h2 className="text-sm font-bold text-slate-900 dark:text-white">
-                สแกนข่าวบทวิเคราะห์และโพยหุ้นเด่นรายวัน ({newsPicks.length} หุ้น ·{" "}
+                {mktCfg.flag} สแกนข่าวบทวิเคราะห์และหุ้นเด่นรายวัน — {mktCfg.label} ({newsPicks.length} หุ้น ·{" "}
                 {(newsElapsed / 1000).toFixed(2)} วินาที)
               </h2>
               <p className="text-xs text-slate-500">
-                จัดอันดับหุ้น SET/mai ที่ถูกโบรกเกอร์และสำนักข่าวหุ้นกล่าวถึงมากที่สุดในรอบล่าสุด
+                จัดอันดับหุ้นที่ถูกโบรกเกอร์และสำนักข่าวการเงินกล่าวถึงมากที่สุดในรอบล่าสุด
               </p>
             </div>
             <button
               type="button"
-              onClick={() => void loadNewsPicks(true)}
+              onClick={() => void loadNewsPicks(activeMarket, true)}
               disabled={newsLoading}
               className="px-3 py-1.5 rounded-xl border border-slate-300 dark:border-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 hover:border-sky-400 cursor-pointer"
             >
@@ -892,7 +847,7 @@ export function ScannerTab() {
             </button>
           </div>
 
-          {newsLoading && newsPicks.length === 0 ? (
+          {newsLoading ? (
             <SkeletonCard lines={6} />
           ) : (
             <div className="overflow-x-auto">
@@ -916,7 +871,7 @@ export function ScannerTab() {
                       <td className="py-2.5 px-3">
                         <button
                           type="button"
-                          onClick={() => jumpToStock(p.symbol)}
+                          onClick={() => jumpToStock(p.symbol, "chart", activeMarket)}
                           className="font-extrabold text-sky-500 hover:underline cursor-pointer"
                         >
                           {p.symbol}

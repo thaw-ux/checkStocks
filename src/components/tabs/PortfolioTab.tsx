@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  ArrowLeftRight,
   BookmarkPlus,
   Briefcase,
   CheckCircle2,
@@ -20,8 +21,10 @@ import {
   DimensionScoreBars,
   SandboxCurveChart,
 } from "@/components/charts/AnalyticsCharts";
+import { MarketSwitcher } from "@/components/common/MarketSwitcher";
 import { SentimentBadge, SkeletonCard } from "@/components/common/UiPrimitives";
-import type { WeeklyPortfolioPayload } from "@/lib/types";
+import { currencySymbol, formatPrice, MARKET_CONFIGS, resolveStockSymbol } from "@/lib/markets";
+import type { FxRatesToThb, MarketId, WeeklyPortfolioPayload } from "@/lib/types";
 import { useAppStore } from "@/store/useAppStore";
 
 type SubMode = "weekly" | "backtest" | "paper";
@@ -36,8 +39,58 @@ interface SandboxResult {
   curve: { date: string; portfolioPct: number; setPct: number; portfolioValue: number }[];
 }
 
+const SANDBOX_PRESETS: Record<MarketId, { symbol: string; weightPct: number }[]> = {
+  SP500: [
+    { symbol: "NVDA", weightPct: 25 },
+    { symbol: "AAPL", weightPct: 25 },
+    { symbol: "MSFT", weightPct: 25 },
+    { symbol: "LLY", weightPct: 25 },
+  ],
+  NASDAQ100: [
+    { symbol: "NVDA", weightPct: 25 },
+    { symbol: "META", weightPct: 25 },
+    { symbol: "AVGO", weightPct: 25 },
+    { symbol: "PLTR", weightPct: 25 },
+  ],
+  HK: [
+    { symbol: "0700.HK", weightPct: 25 },
+    { symbol: "9988.HK", weightPct: 25 },
+    { symbol: "1211.HK", weightPct: 25 },
+    { symbol: "1810.HK", weightPct: 25 },
+  ],
+  CHINA: [
+    { symbol: "600519.SS", weightPct: 25 },
+    { symbol: "300750.SZ", weightPct: 25 },
+    { symbol: "BABA", weightPct: 25 },
+    { symbol: "PDD", weightPct: 25 },
+  ],
+  DR: [
+    { symbol: "NVDA80", weightPct: 25 },
+    { symbol: "AAPL80", weightPct: 25 },
+    { symbol: "TENCENT80", weightPct: 25 },
+    { symbol: "CN01", weightPct: 25 },
+  ],
+};
+
+const DEFAULT_FX: FxRatesToThb = {
+  USD: 34.0,
+  HKD: 4.35,
+  CNY: 4.85,
+  THB: 1,
+  updatedAt: "",
+};
+
+function rateToThb(currency: string | undefined, fx: FxRatesToThb): number {
+  if (currency === "THB") return 1;
+  if (currency === "HKD") return fx.HKD;
+  if (currency === "CNY") return fx.CNY;
+  return fx.USD;
+}
+
 export function PortfolioTab() {
   const {
+    activeMarket,
+    setActiveMarket,
     jumpToStock,
     jumpToTimeMachine,
     paperTrades,
@@ -52,79 +105,85 @@ export function PortfolioTab() {
   } = useAppStore();
 
   const [subMode, setSubMode] = useState<SubMode>("weekly");
-  const [baseCapital, setBaseCapital] = useState(100_000);
+  const [baseCapital, setBaseCapital] = useState(MARKET_CONFIGS[activeMarket].defaultCapital);
   const [weeklyData, setWeeklyData] = useState<WeeklyPortfolioPayload | null>(null);
   const [weeklyLoading, setWeeklyLoading] = useState(false);
   const [weeklyError, setWeeklyError] = useState("");
 
-  // Sandbox backtest state
-  const [sandboxRows, setSandboxRows] = useState([
-    { symbol: "PTT", weightPct: 25 },
-    { symbol: "CPALL", weightPct: 25 },
-    { symbol: "BDMS", weightPct: 25 },
-    { symbol: "ADVANC", weightPct: 25 },
-  ]);
+  // Sandbox state
+  const [sandboxRows, setSandboxRows] = useState(SANDBOX_PRESETS[activeMarket]);
   const [sandboxDays, setSandboxDays] = useState(60);
   const [sandboxLoading, setSandboxLoading] = useState(false);
   const [sandboxResult, setSandboxResult] = useState<SandboxResult | null>(null);
+  const [sandboxBenchLabel, setSandboxBenchLabel] = useState(
+    MARKET_CONFIGS[activeMarket].benchmarkLabel
+  );
   const [sandboxError, setSandboxError] = useState("");
 
-  // Paper Trade state
+  // Paper Trade & Live FX state
   const [liveQuotes, setLiveQuotes] = useState<
-    Record<string, { price: number | null; changePct: number | null }>
+    Record<string, { price: number | null; changePct: number | null; currency?: string }>
   >({});
+  const [fxRates, setFxRates] = useState<FxRatesToThb>(DEFAULT_FX);
+  const [showInThb, setShowInThb] = useState(true);
   const [quotesLoading, setQuotesLoading] = useState(false);
   const [ptSymbol, setPtSymbol] = useState("");
   const [ptEntry, setPtEntry] = useState("");
-  const [ptShares, setPtShares] = useState("1000");
+  const [ptShares, setPtShares] = useState("10");
   const [ptStop, setPtStop] = useState("");
   const [ptTarget, setPtTarget] = useState("");
-  const [ptStrategy, setPtStrategy] = useState("Swing SET50");
+  const [ptStrategy, setPtStrategy] = useState("Swing 360°");
   const [ptNote, setPtNote] = useState("");
   const importFileRef = useRef<HTMLInputElement>(null);
 
-  const loadWeekly = useCallback(
-    async (refresh = false) => {
-      setWeeklyLoading(true);
-      setWeeklyError("");
-      try {
-        const res = await fetch(
-          `/api/portfolio/weekly?capital=${baseCapital}${refresh ? "&refresh=1" : ""}`
-        );
-        const json = (await res.json()) as WeeklyPortfolioPayload & { error?: string };
-        if (!res.ok) throw new Error(json.error || "โหลดพอร์ตจำลองรายสัปดาห์ไม่สำเร็จ");
-        setWeeklyData(json);
-      } catch (err) {
-        setWeeklyError(err instanceof Error ? err.message : "เกิดข้อผิดพลาด");
-      } finally {
-        setWeeklyLoading(false);
-      }
-    },
-    [baseCapital]
-  );
+  const handleMarketSwitch = (mkt: MarketId) => {
+    setActiveMarket(mkt);
+    setBaseCapital(MARKET_CONFIGS[mkt].defaultCapital);
+    setSandboxRows(SANDBOX_PRESETS[mkt]);
+    setSandboxResult(null);
+    setSandboxBenchLabel(MARKET_CONFIGS[mkt].benchmarkLabel);
+  };
+
+  const loadWeekly = useCallback(async (mkt: MarketId, cap: number, refresh = false) => {
+    setWeeklyLoading(true);
+    setWeeklyError("");
+    try {
+      const res = await fetch(
+        `/api/portfolio/weekly?market=${mkt}&capital=${cap}${refresh ? "&refresh=1" : ""}`
+      );
+      const json = (await res.json()) as WeeklyPortfolioPayload & { error?: string };
+      if (!res.ok) throw new Error(json.error || "โหลดพอร์ตจำลองรายสัปดาห์ไม่สำเร็จ");
+      setWeeklyData(json);
+    } catch (err) {
+      setWeeklyError(err instanceof Error ? err.message : "เกิดข้อผิดพลาด");
+    } finally {
+      setWeeklyLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    void loadWeekly(false);
-  }, [loadWeekly]);
+    void loadWeekly(activeMarket, baseCapital, false);
+  }, [activeMarket, baseCapital, loadWeekly]);
 
-  // Fetch live quotes for open paper trades
   const refreshPaperQuotes = useCallback(async () => {
     const syms = Array.from(new Set(paperTrades.map((t) => t.symbol)));
-    if (syms.length === 0) return;
     setQuotesLoading(true);
     try {
-      const res = await fetch(`/api/portfolio/quotes?symbols=${encodeURIComponent(syms.join(","))}`);
+      const qs = syms.length > 0 ? `?symbols=${encodeURIComponent(syms.join(","))}` : "";
+      const res = await fetch(`/api/portfolio/quotes${qs}`);
       const json = (await res.json()) as {
-        quotes?: Record<string, { price: number | null; changePct: number | null }>;
+        quotes?: Record<string, { price: number | null; changePct: number | null; currency?: string }>;
+        fxRates?: FxRatesToThb;
       };
       if (json.quotes) setLiveQuotes(json.quotes);
+      if (json.fxRates) setFxRates(json.fxRates);
     } finally {
       setQuotesLoading(false);
     }
   }, [paperTrades]);
 
   useEffect(() => {
-    if (subMode === "paper" && paperTrades.length > 0) {
+    if (subMode === "paper") {
       void refreshPaperQuotes();
     }
   }, [subMode, paperTrades.length, refreshPaperQuotes]);
@@ -140,11 +199,17 @@ export function PortfolioTab() {
           holdings: sandboxRows,
           lookbackDays: sandboxDays,
           initialCapital: baseCapital,
+          market: activeMarket,
         }),
       });
-      const json = (await res.json()) as { result?: SandboxResult; error?: string };
+      const json = (await res.json()) as {
+        result?: SandboxResult;
+        benchmarkLabel?: string;
+        error?: string;
+      };
       if (!res.ok || !json.result) throw new Error(json.error || "รัน Sandbox ไม่สำเร็จ");
       setSandboxResult(json.result);
+      if (json.benchmarkLabel) setSandboxBenchLabel(json.benchmarkLabel);
     } catch (err) {
       setSandboxError(err instanceof Error ? err.message : "รัน Sandbox ไม่สำเร็จ");
     } finally {
@@ -154,24 +219,27 @@ export function PortfolioTab() {
 
   function handleAddPaperTrade(e: React.FormEvent) {
     e.preventDefault();
-    const sym = ptSymbol.trim().toUpperCase().replace(/\.BK$/i, "");
+    const resolved = resolveStockSymbol(ptSymbol, activeMarket);
     const entry = Number(ptEntry);
-    const sharesRaw = Math.max(100, Math.floor((Number(ptShares) || 100) / 100) * 100);
+    const step = resolved.lotSize;
+    const sharesRaw = Math.max(step, Math.floor((Number(ptShares) || step) / step) * step);
     const stop = Number(ptStop) || Number((entry * 0.95).toFixed(2));
     const target = Number(ptTarget) || Number((entry * 1.1).toFixed(2));
-    if (!sym || !Number.isFinite(entry) || entry <= 0) {
+    if (!resolved.symbol || !Number.isFinite(entry) || entry <= 0) {
       showToast("กรุณากรอกชื่อหุ้นและราคาเข้าซื้อให้ถูกต้อง");
       return;
     }
     addPaperTrade({
-      symbol: sym,
+      symbol: resolved.symbol,
+      market: resolved.market,
+      currency: resolved.currency,
       status: "open",
       entryPrice: entry,
       shares: sharesRaw,
       stopLoss: stop,
       targetPrice: target,
       entryDate: new Date().toISOString().slice(0, 10),
-      strategy: ptStrategy.trim() || "Swing",
+      strategy: ptStrategy.trim() || "Swing 360°",
       note: ptNote.trim(),
     });
     setPtSymbol("");
@@ -187,7 +255,7 @@ export function PortfolioTab() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `set360-paper-trade-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `global360-paper-trade-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
     URL.revokeObjectURL(url);
     showToast("ดาวน์โหลดไฟล์สำรอง Paper Trade (.json) แล้ว");
@@ -206,40 +274,56 @@ export function PortfolioTab() {
   }
 
   const paperStats = useMemo(() => {
-    let openCost = 0;
-    let unrealizedBaht = 0;
-    let realizedBaht = 0;
+    let openCostThb = 0;
+    let openValueThb = 0;
+    let unrealizedThb = 0;
+    let realizedThb = 0;
     let closedWins = 0;
     let closedCount = 0;
 
     for (const t of paperTrades) {
+      const curCode = t.currency ?? liveQuotes[t.symbol]?.currency ?? resolveStockSymbol(t.symbol).currency;
+      const fx = rateToThb(curCode, fxRates);
+
       if (t.status === "open") {
-        openCost += t.entryPrice * t.shares;
-        const cur = liveQuotes[t.symbol]?.price ?? t.entryPrice;
-        unrealizedBaht += (cur - t.entryPrice) * t.shares;
+        const curPrice = liveQuotes[t.symbol]?.price ?? t.entryPrice;
+        const costThb = t.entryPrice * t.shares * fx;
+        const valThb = curPrice * t.shares * fx;
+        openCostThb += costThb;
+        openValueThb += valThb;
+        unrealizedThb += valThb - costThb;
       } else if (t.exitPrice !== undefined) {
         closedCount++;
-        const pnl = (t.exitPrice - t.entryPrice) * t.shares;
-        realizedBaht += pnl;
-        if (pnl > 0) closedWins++;
+        const pnlNative = (t.exitPrice - t.entryPrice) * t.shares;
+        realizedThb += pnlNative * fx;
+        if (pnlNative > 0) closedWins++;
       }
     }
 
-    const unrealizedPct = openCost > 0 ? (unrealizedBaht / openCost) * 100 : 0;
+    const unrealizedPct = openCostThb > 0 ? (unrealizedThb / openCostThb) * 100 : 0;
     const winRatePct = closedCount > 0 ? (closedWins / closedCount) * 100 : 0;
     return {
       openCount: paperTrades.filter((t) => t.status === "open").length,
       closedCount,
-      openCost,
-      unrealizedBaht,
+      openCostThb,
+      openValueThb,
+      unrealizedThb,
       unrealizedPct,
-      realizedBaht,
+      realizedThb,
       winRatePct,
     };
-  }, [paperTrades, liveQuotes]);
+  }, [paperTrades, liveQuotes, fxRates]);
+
+  const mktCfg = MARKET_CONFIGS[activeMarket];
+  const mktUnit = currencySymbol(mktCfg.defaultCurrency);
 
   return (
     <div className="space-y-5">
+      {/* Market Switcher */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <MarketSwitcher value={activeMarket} onChange={handleMarketSwitch} />
+      </div>
+
       {/* Sub-mode switcher */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="inline-flex flex-wrap rounded-xl bg-slate-200/70 dark:bg-slate-900 border border-slate-300/80 dark:border-slate-800 p-1 gap-1">
@@ -273,14 +357,25 @@ export function PortfolioTab() {
               onChange={(e) => setBaseCapital(Number(e.target.value))}
               className="rounded-xl bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-xs font-semibold outline-none"
             >
-              <option value={100000}>เงินตั้งต้น 100,000 บ.</option>
-              <option value={300000}>เงินตั้งต้น 300,000 บ.</option>
-              <option value={500000}>เงินตั้งต้น 500,000 บ.</option>
-              <option value={1000000}>เงินตั้งต้น 1,000,000 บ.</option>
+              {mktCfg.defaultCurrency === "USD" ? (
+                <>
+                  <option value={10000}>เงินตั้งต้น $10,000</option>
+                  <option value={30000}>เงินตั้งต้น $30,000</option>
+                  <option value={50000}>เงินตั้งต้น $50,000</option>
+                  <option value={100000}>เงินตั้งต้น $100,000</option>
+                </>
+              ) : (
+                <>
+                  <option value={100000}>เงินตั้งต้น {mktUnit}100,000</option>
+                  <option value={300000}>เงินตั้งต้น {mktUnit}300,000</option>
+                  <option value={500000}>เงินตั้งต้น {mktUnit}500,000</option>
+                  <option value={1000000}>เงินตั้งต้น {mktUnit}1,000,000</option>
+                </>
+              )}
             </select>
             <button
               type="button"
-              onClick={() => void loadWeekly(true)}
+              onClick={() => void loadWeekly(activeMarket, baseCapital, true)}
               disabled={weeklyLoading}
               className="px-3 py-1.5 rounded-xl border border-slate-300 dark:border-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 hover:border-sky-400 cursor-pointer"
             >
@@ -300,14 +395,13 @@ export function PortfolioTab() {
             </div>
           )}
 
-          {weeklyLoading && !weeklyData ? (
+          {weeklyLoading ? (
             <div className="space-y-4">
               <SkeletonCard lines={2} />
               <SkeletonCard lines={6} />
             </div>
           ) : weeklyData ? (
             <div className="space-y-4">
-              {/* Emergency Alerts Banner */}
               {weeklyData.emergencyAlerts.length > 0 && (
                 <div className="rounded-2xl border border-rose-500/45 bg-rose-500/10 p-4 space-y-2">
                   <div className="text-xs font-extrabold text-rose-500 flex items-center gap-1.5">
@@ -326,11 +420,10 @@ export function PortfolioTab() {
                 </div>
               )}
 
-              {/* Weekly KPI Summary */}
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                 <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-4">
                   <div className="text-[11px] text-slate-500">
-                    พอร์ต 360° ({weeklyData.weekLabel})
+                    {mktCfg.flag} พอร์ต 360° ({weeklyData.weekLabel})
                   </div>
                   <div
                     className={`text-2xl font-extrabold tabular-nums mt-1 ${
@@ -342,11 +435,14 @@ export function PortfolioTab() {
                   </div>
                   <div className="text-xs text-slate-400 tabular-nums">
                     {weeklyData.totalPnlBaht >= 0 ? "+" : ""}
-                    {weeklyData.totalPnlBaht.toLocaleString()} บ.
+                    {mktUnit}
+                    {Math.abs(weeklyData.totalPnlBaht).toLocaleString()}
                   </div>
                 </div>
                 <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-4">
-                  <div className="text-[11px] text-slate-500">เทียบดัชนี SET สัปดาห์นี้</div>
+                  <div className="text-[11px] text-slate-500">
+                    เทียบดัชนี {weeklyData.benchmarkLabel} สัปดาห์นี้
+                  </div>
                   <div
                     className={`text-2xl font-extrabold tabular-nums mt-1 ${
                       weeklyData.setWeekReturnPct >= 0 ? "text-emerald-500" : "text-rose-500"
@@ -372,7 +468,7 @@ export function PortfolioTab() {
                 <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-4">
                   <div className="text-[11px] text-slate-500">เกณฑ์คัดเลือก 5 มิติ</div>
                   <div className="text-sm font-extrabold text-slate-900 dark:text-white mt-1.5">
-                    Top 5 จาก SET50
+                    Top 5 จาก {mktCfg.shortLabel}
                   </div>
                   <div className="text-[11px] text-slate-400">
                     จำกัดไม่เกิน 2 หุ้น/หมวดธุรกิจ
@@ -380,10 +476,9 @@ export function PortfolioTab() {
                 </div>
               </div>
 
-              {/* Top 5 Weekly Picks Cards */}
               <div className="space-y-3">
                 <h2 className="text-sm font-bold text-slate-900 dark:text-white">
-                  แผนหุ้น Top 5 ประจำสัปดาห์ (ล็อกราคาเปิดวันจันทร์ {weeklyData.mondayDate})
+                  แผนหุ้น Top 5 ประจำสัปดาห์ — {mktCfg.label} (ล็อกราคาเปิดวันจันทร์ {weeklyData.mondayDate})
                 </h2>
 
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
@@ -400,7 +495,7 @@ export function PortfolioTab() {
                             </span>
                             <button
                               type="button"
-                              onClick={() => jumpToStock(p.symbol)}
+                              onClick={() => jumpToStock(p.symbol, "chart", activeMarket)}
                               className="text-lg font-extrabold text-slate-900 dark:text-white hover:text-sky-400 cursor-pointer"
                             >
                               {p.symbol}
@@ -420,8 +515,7 @@ export function PortfolioTab() {
                             }`}
                           >
                             {p.pnlPct >= 0 ? "+" : ""}
-                            {p.pnlPct.toFixed(2)}% ({p.pnlBaht >= 0 ? "+" : ""}
-                            {p.pnlBaht.toLocaleString()} บ.)
+                            {p.pnlPct.toFixed(2)}%
                           </div>
                         </div>
                       </div>
@@ -429,20 +523,24 @@ export function PortfolioTab() {
                       <div className="grid grid-cols-4 gap-2 text-xs tabular-nums">
                         <div className="rounded-lg bg-slate-50 dark:bg-slate-950/70 border border-slate-200/70 dark:border-slate-800 p-2">
                           <div className="text-[10px] text-slate-500">เข้า (จันทร์)</div>
-                          <div className="font-bold">{p.entryPrice.toFixed(2)}</div>
+                          <div className="font-bold">{formatPrice(p.entryPrice, p.currency)}</div>
                         </div>
                         <div className="rounded-lg bg-slate-50 dark:bg-slate-950/70 border border-slate-200/70 dark:border-slate-800 p-2">
                           <div className="text-[10px] text-slate-500">ราคาล่าสุด</div>
-                          <div className="font-bold text-sky-500">{p.currentPrice.toFixed(2)}</div>
+                          <div className="font-bold text-sky-500">
+                            {formatPrice(p.currentPrice, p.currency)}
+                          </div>
                         </div>
                         <div className="rounded-lg bg-rose-500/5 border border-rose-500/20 p-2">
                           <div className="text-[10px] text-rose-400">Stop Loss</div>
-                          <div className="font-bold text-rose-500">{p.stopLoss.toFixed(2)}</div>
+                          <div className="font-bold text-rose-500">
+                            {formatPrice(p.stopLoss, p.currency)}
+                          </div>
                         </div>
                         <div className="rounded-lg bg-emerald-500/5 border border-emerald-500/20 p-2">
                           <div className="text-[10px] text-emerald-400">Target</div>
                           <div className="font-bold text-emerald-500">
-                            {p.targetPrice.toFixed(2)}
+                            {formatPrice(p.targetPrice, p.currency)}
                           </div>
                         </div>
                       </div>
@@ -451,9 +549,9 @@ export function PortfolioTab() {
 
                       <div className="pt-2 border-t border-slate-200/70 dark:border-slate-800/70 flex flex-wrap items-center justify-between gap-2 text-[11px]">
                         <span className="text-slate-500 tabular-nums">
-                          {p.sharesBoardLot.toLocaleString()} หุ้น ({p.allocatedBaht.toLocaleString()} บ.) ·
-                          5D Win <strong className="text-emerald-500">{p.winRate5dPct}%</strong> ·
-                          R:R 1:{p.rrRatio}
+                          {p.sharesBoardLot.toLocaleString()} หุ้น · 5D Win{" "}
+                          <strong className="text-emerald-500">{p.winRate5dPct}%</strong> · R:R 1:
+                          {p.rrRatio}
                         </span>
                         <div className="flex items-center gap-1.5">
                           <button
@@ -461,10 +559,11 @@ export function PortfolioTab() {
                             onClick={() =>
                               jumpToTimeMachine({
                                 symbol: p.symbol,
+                                market: activeMarket,
                                 entry: p.entryPrice,
                                 stop: p.stopLoss,
                                 target: p.targetPrice,
-                                sourceLabel: "พอร์ต 360° รายสัปดาห์",
+                                sourceLabel: `พอร์ต 360° ${mktCfg.shortLabel}`,
                               })
                             }
                             className="px-2.5 py-1 rounded-lg bg-sky-500/15 hover:bg-sky-500 hover:text-slate-950 text-sky-500 font-bold inline-flex items-center gap-1 transition cursor-pointer"
@@ -476,13 +575,15 @@ export function PortfolioTab() {
                             onClick={() =>
                               addPaperTrade({
                                 symbol: p.symbol,
+                                market: activeMarket,
+                                currency: p.currency,
                                 status: "open",
                                 entryPrice: p.entryPrice,
                                 shares: p.sharesBoardLot,
                                 stopLoss: p.stopLoss,
                                 targetPrice: p.targetPrice,
                                 entryDate: weeklyData.mondayDate,
-                                strategy: "พอร์ตจำลอง 360° รายสัปดาห์",
+                                strategy: `พอร์ตจำลอง 360° (${mktCfg.shortLabel})`,
                                 note: `คะแนน ${p.scores.total}/100 · ${p.rationaleTh}`,
                               })
                             }
@@ -504,20 +605,24 @@ export function PortfolioTab() {
       {/* SUB-MODE 2: 12-WEEK BACKTEST & SANDBOX */}
       {subMode === "backtest" && (
         <div className="space-y-5">
-          {/* 12-Week Backtest vs SET */}
           <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-5 space-y-4">
             <div>
               <h2 className="text-sm font-bold text-slate-900 dark:text-white">
-                สถิติย้อนหลังพอร์ตจำลอง 360° (12 สัปดาห์) เทียบดัชนี SET Index
+                {mktCfg.flag} สถิติย้อนหลังพอร์ตจำลอง 360° ({mktCfg.shortLabel} · 12 สัปดาห์) เทียบ{" "}
+                {weeklyData?.benchmarkLabel ?? mktCfg.benchmarkLabel}
               </h2>
               <p className="text-xs text-slate-500">
-                จำลองการคัด Top 5 SET50 ทุกวันจันทร์โดยใช้เฉพาะข้อมูลก่อนเปิดตลาดจันทร์ (Zero Look-Ahead) พร้อมวินัย Stop Loss -4.5% / Take Profit +8.5%
+                จำลองการคัด Top 5 ทุกวันจันทร์โดยใช้เฉพาะข้อมูลก่อนเปิดตลาดจันทร์ (Zero Look-Ahead) พร้อมวินัย Stop Loss -4.5% / Take Profit +8.5%
               </p>
             </div>
 
             {weeklyData && weeklyData.backtest12W.length > 0 ? (
               <>
-                <Backtest12WChart points={weeklyData.backtest12W} theme={theme} />
+                <Backtest12WChart
+                  points={weeklyData.backtest12W}
+                  theme={theme}
+                  benchmarkLabel={weeklyData.benchmarkLabel}
+                />
                 <div className="overflow-x-auto">
                   <table className="w-full text-xs text-left">
                     <thead>
@@ -525,8 +630,8 @@ export function PortfolioTab() {
                         <th className="py-2 pr-3">สัปดาห์</th>
                         <th className="py-2 px-3">หุ้นที่คัดได้ (Top 5)</th>
                         <th className="py-2 px-3 text-right">พอร์ต 360°</th>
-                        <th className="py-2 px-3 text-right">SET Index</th>
-                        <th className="py-2 pl-3 text-right">สะสม 360° vs SET</th>
+                        <th className="py-2 px-3 text-right">{weeklyData.benchmarkLabel}</th>
+                        <th className="py-2 pl-3 text-right">สะสม 360° vs ดัชนี</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200/60 dark:divide-slate-800/60 tabular-nums">
@@ -541,7 +646,7 @@ export function PortfolioTab() {
                                 <button
                                   key={s}
                                   type="button"
-                                  onClick={() => jumpToStock(s)}
+                                  onClick={() => jumpToStock(s, "chart", activeMarket)}
                                   className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-[10px] font-bold hover:text-sky-400 cursor-pointer"
                                 >
                                   {s}
@@ -596,10 +701,11 @@ export function PortfolioTab() {
           <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-5 space-y-4">
             <div>
               <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                Sandbox Backtest · จำลองจัดพอร์ตหุ้นไทยเองเทียบ SET Index
+                Sandbox Backtest · จำลองจัดพอร์ตเอง (ผสมหุ้นสหรัฐฯ / ฮ่องกง / จีน / DR ได้อิสระ) เทียบ{" "}
+                {mktCfg.benchmarkLabel}
               </h3>
               <p className="text-xs text-slate-500">
-                เลือกหุ้น SET/mai และน้ำหนัก % ที่อยากทดสอบเพื่อดูผลตอบแทนย้อนหลังจริง, Alpha และ Max Drawdown
+                ระบุหุ้นและน้ำหนัก % เพื่อดูผลตอบแทนย้อนหลังจริง, Alpha และ Max Drawdown
               </p>
             </div>
 
@@ -616,8 +722,8 @@ export function PortfolioTab() {
                         )
                       )
                     }
-                    placeholder="ชื่อหุ้น เช่น PTT"
-                    className="w-36 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 px-3 py-2 text-xs font-bold uppercase outline-none focus:border-sky-400"
+                    placeholder="เช่น NVDA, 0700.HK, 600519.SS, NVDA80"
+                    className="w-52 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 px-3 py-2 text-xs font-bold uppercase outline-none focus:border-sky-400"
                   />
                   <input
                     type="number"
@@ -706,7 +812,7 @@ export function PortfolioTab() {
                     </div>
                   </div>
                   <div className="rounded-xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 p-3">
-                    <div className="text-slate-500">SET Index ช่วงเดียวกัน</div>
+                    <div className="text-slate-500">{sandboxBenchLabel} ช่วงเดียวกัน</div>
                     <div
                       className={`text-xl font-extrabold tabular-nums mt-0.5 ${
                         sandboxResult.setReturnPct >= 0 ? "text-emerald-500" : "text-rose-500"
@@ -734,54 +840,95 @@ export function PortfolioTab() {
                     </div>
                   </div>
                 </div>
-                <SandboxCurveChart curve={sandboxResult.curve} theme={theme} />
+                <SandboxCurveChart
+                  curve={sandboxResult.curve}
+                  theme={theme}
+                  benchmarkLabel={sandboxBenchLabel}
+                />
               </div>
             )}
           </div>
         </div>
       )}
 
-      {/* SUB-MODE 3: PERSONAL PAPER TRADE JOURNAL */}
+      {/* SUB-MODE 3: PERSONAL PAPER TRADE JOURNAL WITH LIVE FX -> THB CONVERSION */}
       {subMode === "paper" && (
         <div className="space-y-4">
-          {/* Paper Trade Stats + Export/Import */}
+          {/* Live FX Rate Strip + Currency Display Toggle */}
+          <div className="rounded-2xl border border-amber-500/35 bg-amber-500/10 dark:bg-amber-950/20 px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div className="flex flex-wrap items-center gap-2.5 tabular-nums">
+              <span className="font-bold text-amber-700 dark:text-amber-300">
+                💱 อัตราแลกเปลี่ยนสด (FX → THB):
+              </span>
+              <span className="px-2 py-0.5 rounded-md bg-white/80 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 font-semibold">
+                USD/THB ฿{fxRates.USD.toFixed(2)}
+              </span>
+              <span className="px-2 py-0.5 rounded-md bg-white/80 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 font-semibold">
+                HKD/THB ฿{fxRates.HKD.toFixed(2)}
+              </span>
+              <span className="px-2 py-0.5 rounded-md bg-white/80 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 font-semibold">
+                CNY/THB ฿{fxRates.CNY.toFixed(2)}
+              </span>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setShowInThb((v) => !v)}
+              className={`px-3 py-1.5 rounded-xl font-bold inline-flex items-center gap-1.5 transition cursor-pointer ${
+                showInThb
+                  ? "bg-amber-500 text-slate-950 shadow-sm"
+                  : "bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200"
+              }`}
+            >
+              <ArrowLeftRight className="h-3.5 w-3.5" />
+              {showInThb ? "โหมดแปลงมูลค่ารวมเป็นเงินบาท (THB) ✓" : "สลับแปลงมูลค่ารวมเป็นเงินบาท (THB)"}
+            </button>
+          </div>
+
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
             <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-4">
-              <div className="text-[11px] text-slate-500">สถานะถือครองอยู่ (Open)</div>
-              <div className="text-2xl font-extrabold tabular-nums mt-1">
-                {paperStats.openCount} รายการ
+              <div className="text-[11px] text-slate-500">
+                {showInThb ? "มูลค่าพอร์ต Open รวม (THB)" : "สถานะถือครองอยู่ (Open)"}
+              </div>
+              <div className="text-2xl font-extrabold tabular-nums mt-1 text-slate-900 dark:text-white">
+                {showInThb
+                  ? `฿${Math.round(paperStats.openValueThb).toLocaleString()}`
+                  : `${paperStats.openCount} รายการ`}
               </div>
               <div className="text-xs text-slate-400 tabular-nums">
-                ต้นทุนรวม {paperStats.openCost.toLocaleString()} บ.
+                {showInThb
+                  ? `${paperStats.openCount} รายการ · ทุน ฿${Math.round(paperStats.openCostThb).toLocaleString()}`
+                  : "รองรับ สหรัฐฯ · ฮ่องกง · จีน · DR"}
               </div>
             </div>
             <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-4">
-              <div className="text-[11px] text-slate-500">กำไร/ขาดทุนยังไม่รับรู้ (Unrealized)</div>
+              <div className="text-[11px] text-slate-500">
+                Unrealized PnL ({showInThb ? "รวมเป็นบาท" : "ถ่วงน้ำหนัก"})
+              </div>
               <div
                 className={`text-2xl font-extrabold tabular-nums mt-1 ${
-                  paperStats.unrealizedBaht >= 0 ? "text-emerald-500" : "text-rose-500"
+                  paperStats.unrealizedThb >= 0 ? "text-emerald-500" : "text-rose-500"
                 }`}
               >
-                {paperStats.unrealizedBaht >= 0 ? "+" : ""}
-                {paperStats.unrealizedBaht.toLocaleString(undefined, { maximumFractionDigits: 0 })} บ.
+                {showInThb
+                  ? `${paperStats.unrealizedThb >= 0 ? "+" : "-"}฿${Math.abs(Math.round(paperStats.unrealizedThb)).toLocaleString()}`
+                  : `${paperStats.unrealizedPct >= 0 ? "+" : ""}${paperStats.unrealizedPct.toFixed(2)}%`}
               </div>
               <div className="text-xs text-slate-400 tabular-nums">
-                ({paperStats.unrealizedPct >= 0 ? "+" : ""}
-                {paperStats.unrealizedPct.toFixed(2)}%)
+                {paperStats.unrealizedPct >= 0 ? "+" : ""}
+                {paperStats.unrealizedPct.toFixed(2)}% จากต้นทุน Open
               </div>
             </div>
             <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-4">
-              <div className="text-[11px] text-slate-500">กำไร/ขาดทุนปิดแล้ว (Realized)</div>
-              <div
-                className={`text-2xl font-extrabold tabular-nums mt-1 ${
-                  paperStats.realizedBaht >= 0 ? "text-emerald-500" : "text-rose-500"
-                }`}
-              >
-                {paperStats.realizedBaht >= 0 ? "+" : ""}
-                {paperStats.realizedBaht.toLocaleString(undefined, { maximumFractionDigits: 0 })} บ.
+              <div className="text-[11px] text-slate-500">ปิดแล้ว (Win Rate · Realized)</div>
+              <div className="text-2xl font-extrabold tabular-nums mt-1 text-sky-500">
+                {paperStats.winRatePct.toFixed(0)}%
               </div>
-              <div className="text-xs text-slate-400">
-                ปิดแล้ว {paperStats.closedCount} ไม้ (Win Rate {paperStats.winRatePct.toFixed(0)}%)
+              <div className="text-xs text-slate-400 tabular-nums">
+                ปิดแล้ว {paperStats.closedCount} ไม้
+                {showInThb && paperStats.closedCount > 0
+                  ? ` · ${paperStats.realizedThb >= 0 ? "+" : "-"}฿${Math.abs(Math.round(paperStats.realizedThb)).toLocaleString()}`
+                  : ""}
               </div>
             </div>
             <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-4 flex flex-col justify-between gap-2">
@@ -812,13 +959,14 @@ export function PortfolioTab() {
             </div>
           </div>
 
-          {/* Add New Paper Trade Form */}
           <form
             onSubmit={handleAddPaperTrade}
             className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-5 space-y-3"
           >
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-bold">จดบันทึก Paper Trade ใหม่</h3>
+              <h3 className="text-sm font-bold">
+                จดบันทึก Paper Trade ใหม่ (S&P 500 · Nasdaq 100 · ฮ่องกง · จีน · DR)
+              </h3>
               <button
                 type="button"
                 onClick={() => void refreshPaperQuotes()}
@@ -826,7 +974,7 @@ export function PortfolioTab() {
                 className="text-xs text-sky-500 hover:underline inline-flex items-center gap-1 cursor-pointer"
               >
                 <RefreshCw className={`h-3.5 w-3.5 ${quotesLoading ? "animate-spin" : ""}`} />
-                อัปเดตราคาตลาดสด
+                อัปเดตราคา & FX สด
               </button>
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-2.5 text-xs">
@@ -834,7 +982,7 @@ export function PortfolioTab() {
                 type="text"
                 value={ptSymbol}
                 onChange={(e) => setPtSymbol(e.target.value.toUpperCase())}
-                placeholder="หุ้น เช่น PTT"
+                placeholder="NVDA, 0700.HK, 600519.SS, NVDA80"
                 required
                 className="rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 px-3 py-2 font-bold uppercase outline-none focus:border-sky-400"
               />
@@ -843,17 +991,17 @@ export function PortfolioTab() {
                 step="0.01"
                 value={ptEntry}
                 onChange={(e) => setPtEntry(e.target.value)}
-                placeholder="ราคาเข้า (บ.)"
+                placeholder="ราคาเข้า"
                 required
                 className="rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 px-3 py-2 tabular-nums outline-none"
               />
               <input
                 type="number"
-                step="100"
-                min="100"
+                step="1"
+                min="1"
                 value={ptShares}
                 onChange={(e) => setPtShares(e.target.value)}
-                placeholder="จำนวนหุ้น (x100)"
+                placeholder="จำนวนหุ้น"
                 required
                 className="rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 px-3 py-2 tabular-nums outline-none"
               />
@@ -862,7 +1010,7 @@ export function PortfolioTab() {
                 step="0.01"
                 value={ptStop}
                 onChange={(e) => setPtStop(e.target.value)}
-                placeholder="Stop Loss (บ.)"
+                placeholder="Stop Loss"
                 className="rounded-xl bg-slate-50 dark:bg-slate-950 border border-rose-500/35 px-3 py-2 tabular-nums outline-none"
               />
               <input
@@ -870,7 +1018,7 @@ export function PortfolioTab() {
                 step="0.01"
                 value={ptTarget}
                 onChange={(e) => setPtTarget(e.target.value)}
-                placeholder="Target (บ.)"
+                placeholder="Target"
                 className="rounded-xl bg-slate-50 dark:bg-slate-950 border border-emerald-500/35 px-3 py-2 tabular-nums outline-none"
               />
               <input
@@ -896,13 +1044,12 @@ export function PortfolioTab() {
             />
           </form>
 
-          {/* Paper Trade List */}
           <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/90 p-5">
             {paperTrades.length === 0 ? (
               <div className="text-center py-8 text-xs text-slate-500 space-y-2">
                 <p>ยังไม่มีรายการในสมุดจด Paper Trade</p>
                 <p>
-                  คุณสามารถเพิ่มรายการด้านบน หรือกดปุ่ม <strong>&quot;ส่งเข้า Paper Trade&quot;</strong> จากหน้า Time Machine, สแกนหุ้น SET50, AI Chat Bot หรือพอร์ตจำลอง 360° ได้ทันทีครับ
+                  บันทึกได้จากฟอร์มด้านบน หรือกดปุ่ม <strong>&quot;ส่งเข้า Paper Trade&quot;</strong> จากหน้า Time Machine, สแกนหุ้น, AI Chat Bot หรือพอร์ตจำลอง 360° ได้ทันทีครับ
                 </p>
               </div>
             ) : isCardView ? (
@@ -912,7 +1059,10 @@ export function PortfolioTab() {
                     t.status === "closed"
                       ? t.exitPrice ?? t.entryPrice
                       : liveQuotes[t.symbol]?.price ?? t.entryPrice;
-                  const pnlBaht = (curPrice - t.entryPrice) * t.shares;
+                  const curCode =
+                    t.currency ?? liveQuotes[t.symbol]?.currency ?? resolveStockSymbol(t.symbol).currency;
+                  const pnlAmt = (curPrice - t.entryPrice) * t.shares;
+                  const pnlThb = pnlAmt * rateToThb(curCode, fxRates);
                   const pnlPct = ((curPrice - t.entryPrice) / t.entryPrice) * 100;
                   return (
                     <div
@@ -923,33 +1073,35 @@ export function PortfolioTab() {
                         <div className="flex items-center gap-2">
                           <button
                             type="button"
-                            onClick={() => jumpToStock(t.symbol)}
+                            onClick={() => jumpToStock(t.symbol, "chart", t.market)}
                             className="font-extrabold text-sm text-sky-500 cursor-pointer"
                           >
                             {t.symbol}
                           </button>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-200 dark:bg-slate-800 font-bold">
+                            {curCode}
+                          </span>
                           <SentimentBadge
-                            bias={t.status === "open" ? "neutral" : pnlBaht >= 0 ? "positive" : "negative"}
+                            bias={t.status === "open" ? "neutral" : pnlAmt >= 0 ? "positive" : "negative"}
                             label={t.status === "open" ? "OPEN" : "CLOSED"}
                           />
                         </div>
                         <span
                           className={`font-extrabold tabular-nums ${
-                            pnlBaht >= 0 ? "text-emerald-500" : "text-rose-500"
+                            pnlAmt >= 0 ? "text-emerald-500" : "text-rose-500"
                           }`}
                         >
-                          {pnlBaht >= 0 ? "+" : ""}
-                          {pnlBaht.toLocaleString(undefined, { maximumFractionDigits: 0 })} บ. (
                           {pnlPct >= 0 ? "+" : ""}
-                          {pnlPct.toFixed(2)}%)
+                          {pnlPct.toFixed(2)}%
+                          {showInThb && curCode !== "THB"
+                            ? ` (≈ ${pnlThb >= 0 ? "+" : "-"}฿${Math.abs(Math.round(pnlThb)).toLocaleString()})`
+                            : ""}
                         </span>
                       </div>
                       <div className="tabular-nums text-slate-500">
-                        {t.shares.toLocaleString()} หุ้น @ {t.entryPrice.toFixed(2)} →{" "}
-                        {curPrice.toFixed(2)} · SL {t.stopLoss.toFixed(2)} / TP{" "}
-                        {t.targetPrice.toFixed(2)}
+                        {t.shares.toLocaleString()} หุ้น @ {formatPrice(t.entryPrice, curCode)} →{" "}
+                        {formatPrice(curPrice, curCode)}
                       </div>
-                      {t.note && <p className="text-slate-400">{t.note}</p>}
                       <div className="flex justify-end gap-2">
                         {t.status === "open" && (
                           <button
@@ -983,7 +1135,7 @@ export function PortfolioTab() {
                       <th className="py-2 px-3 text-right">ทุนเข้า</th>
                       <th className="py-2 px-3 text-right">ล่าสุด / ปิด</th>
                       <th className="py-2 px-3">Stop / Target</th>
-                      <th className="py-2 px-3 text-right">PnL (บาท / %)</th>
+                      <th className="py-2 px-3 text-right">PnL {showInThb ? "(ต้นทาง / ฿)" : ""}</th>
                       <th className="py-2 px-3">กลยุทธ์ / โน้ต</th>
                       <th className="py-2 pl-3 text-right">จัดการ</th>
                     </tr>
@@ -994,7 +1146,11 @@ export function PortfolioTab() {
                         t.status === "closed"
                           ? t.exitPrice ?? t.entryPrice
                           : liveQuotes[t.symbol]?.price ?? t.entryPrice;
-                      const pnlBaht = (curPrice - t.entryPrice) * t.shares;
+                      const curCode =
+                        t.currency ?? liveQuotes[t.symbol]?.currency ?? resolveStockSymbol(t.symbol).currency;
+                      const u = currencySymbol(curCode);
+                      const pnlAmt = (curPrice - t.entryPrice) * t.shares;
+                      const pnlThb = pnlAmt * rateToThb(curCode, fxRates);
                       const pnlPct = ((curPrice - t.entryPrice) / t.entryPrice) * 100;
                       return (
                         <tr key={t.id} className="hover:bg-sky-500/5">
@@ -1003,7 +1159,7 @@ export function PortfolioTab() {
                               bias={
                                 t.status === "open"
                                   ? "neutral"
-                                  : pnlBaht >= 0
+                                  : pnlAmt >= 0
                                     ? "positive"
                                     : "negative"
                               }
@@ -1011,23 +1167,28 @@ export function PortfolioTab() {
                             />
                           </td>
                           <td className="py-2.5 px-3">
-                            <button
-                              type="button"
-                              onClick={() => jumpToStock(t.symbol)}
-                              className="font-extrabold text-sky-500 hover:underline cursor-pointer"
-                            >
-                              {t.symbol}
-                            </button>
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => jumpToStock(t.symbol, "chart", t.market)}
+                                className="font-extrabold text-sky-500 hover:underline cursor-pointer"
+                              >
+                                {t.symbol}
+                              </button>
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 font-semibold">
+                                {curCode}
+                              </span>
+                            </div>
                             <div className="text-[10px] text-slate-500">{t.entryDate}</div>
                           </td>
                           <td className="py-2.5 px-3 text-right tabular-nums font-semibold">
                             {t.shares.toLocaleString()}
                           </td>
-                          <td className="py-2.5 px-3 text-right tabular-nums">
-                            {t.entryPrice.toFixed(2)}
+                          <td className="py-2.5 px-3 text-right tabular-nums whitespace-nowrap">
+                            {formatPrice(t.entryPrice, curCode)}
                           </td>
-                          <td className="py-2.5 px-3 text-right tabular-nums font-bold">
-                            {curPrice.toFixed(2)}
+                          <td className="py-2.5 px-3 text-right tabular-nums font-bold whitespace-nowrap">
+                            {formatPrice(curPrice, curCode)}
                           </td>
                           <td className="py-2.5 px-3 tabular-nums whitespace-nowrap">
                             <span className="text-rose-500">{t.stopLoss.toFixed(2)}</span> /{" "}
@@ -1035,13 +1196,22 @@ export function PortfolioTab() {
                           </td>
                           <td
                             className={`py-2.5 px-3 text-right tabular-nums font-extrabold whitespace-nowrap ${
-                              pnlBaht >= 0 ? "text-emerald-500" : "text-rose-500"
+                              pnlAmt >= 0 ? "text-emerald-500" : "text-rose-500"
                             }`}
                           >
-                            {pnlBaht >= 0 ? "+" : ""}
-                            {pnlBaht.toLocaleString(undefined, { maximumFractionDigits: 0 })} บ. (
-                            {pnlPct >= 0 ? "+" : ""}
-                            {pnlPct.toFixed(2)}%)
+                            <div>
+                              {pnlAmt >= 0 ? "+" : "-"}
+                              {u}
+                              {Math.abs(pnlAmt).toLocaleString(undefined, { maximumFractionDigits: 0 })} (
+                              {pnlPct >= 0 ? "+" : ""}
+                              {pnlPct.toFixed(2)}%)
+                            </div>
+                            {showInThb && curCode !== "THB" && (
+                              <div className="text-[10px] font-semibold text-amber-500/90">
+                                ≈ {pnlThb >= 0 ? "+" : "-"}฿
+                                {Math.abs(Math.round(pnlThb)).toLocaleString()}
+                              </div>
+                            )}
                           </td>
                           <td className="py-2.5 px-3 text-slate-500 max-w-[200px]">
                             <div className="font-semibold text-slate-700 dark:text-slate-300">
@@ -1056,7 +1226,6 @@ export function PortfolioTab() {
                                   type="button"
                                   onClick={() => closePaperTrade(t.id, curPrice)}
                                   className="px-2 py-1 rounded-lg bg-sky-500/15 hover:bg-sky-500 hover:text-slate-950 text-sky-500 font-bold inline-flex items-center gap-1 cursor-pointer"
-                                  title="ปิดสถานะที่ราคาตลาดปัจจุบัน"
                                 >
                                   <CheckCircle2 className="h-3.5 w-3.5" /> ปิดไม้
                                 </button>
@@ -1065,7 +1234,6 @@ export function PortfolioTab() {
                                 type="button"
                                 onClick={() => deletePaperTrade(t.id)}
                                 className="p-1.5 rounded-lg text-slate-400 hover:text-rose-500 cursor-pointer"
-                                title="ลบรายการ"
                               >
                                 <Trash2 className="h-3.5 w-3.5" />
                               </button>

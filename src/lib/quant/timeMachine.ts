@@ -19,8 +19,19 @@ export function calcBoardLotSizing(params: {
   entry: number;
   stop: number;
   target: number;
+  lotSize?: number;
+  currency?: string;
 }): BoardLotSizing {
-  const { symbol, portfolioBaht, riskPct, entry, stop, target } = params;
+  const {
+    symbol,
+    portfolioBaht,
+    riskPct,
+    entry,
+    stop,
+    target,
+    lotSize = 1,
+    currency = "USD",
+  } = params;
   const riskPerShare = Math.max(0.01, entry - stop);
   const rewardPerShare = Math.max(0, target - entry);
   const rrRatio = Number((rewardPerShare / riskPerShare).toFixed(2));
@@ -29,8 +40,8 @@ export function calcBoardLotSizing(params: {
   const rawSharesByRisk = Math.floor(maxRiskBudget / riskPerShare);
   const maxSharesByCash = entry > 0 ? Math.floor(portfolioBaht / entry) : 0;
   const cappedShares = Math.min(rawSharesByRisk, maxSharesByCash);
-  // Thai SET Board Lot = 100 shares
-  const shares = Math.max(0, Math.floor(cappedShares / 100) * 100);
+  const step = Math.max(1, lotSize);
+  const shares = Math.max(0, Math.floor(cappedShares / step) * step);
 
   const positionValue = Number((shares * entry).toFixed(2));
   const portfolioAllocPct =
@@ -38,7 +49,8 @@ export function calcBoardLotSizing(params: {
   const maxLossBaht = Number((shares * riskPerShare).toFixed(0));
   const targetGainBaht = Number((shares * rewardPerShare).toFixed(0));
 
-  const copySnippet = `📌 แผนเทรด ${symbol}.BK | BUY ${entry.toFixed(2)} | STOP ${stop.toFixed(2)} | TARGET ${target.toFixed(2)} | R:R 1:${rrRatio.toFixed(2)} | ขนาด ${shares.toLocaleString()} หุ้น (${positionValue.toLocaleString()} บ.)`;
+  const unit = currency === "USD" ? "$" : currency === "HKD" ? "HK$" : currency === "CNY" ? "¥" : "฿";
+  const copySnippet = `📌 แผนเทรด ${symbol} | BUY ${entry.toFixed(2)} | STOP ${stop.toFixed(2)} | TARGET ${target.toFixed(2)} (${unit}) | R:R 1:${rrRatio.toFixed(2)} | ขนาด ${shares.toLocaleString()} หุ้น (${positionValue.toLocaleString()} ${unit})`;
 
   return {
     shares,
@@ -97,7 +109,7 @@ export function getHorizonConfig(horizon: TimeMachineHorizon): {
       };
     case "1d_5m":
       return {
-        steps: 54, // SET trading day ~4.5h = 54 x 5-min bars
+        steps: 60, // Global market intraday ~5h = 60 x 5-min bars
         blockLen: 4,
         label: "Intraday 1 วันทำการ (แท่ง 5 นาที · หุ้นใหญ่สภาพคล่องสูง)",
         unitLabel: "B",
@@ -107,7 +119,7 @@ export function getHorizonConfig(horizon: TimeMachineHorizon): {
       return {
         steps: 10,
         blockLen: 2,
-        label: "Swing 10 วันทำการ (มาตรฐานหุ้นไทย)",
+        label: "Swing 10 วันทำการ (มาตรฐาน 2 สัปดาห์)",
         unitLabel: "D",
       };
   }

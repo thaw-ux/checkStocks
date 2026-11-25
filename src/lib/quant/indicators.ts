@@ -120,6 +120,19 @@ export function calcATR(bars: OhlcvBar[], period = 14): (number | null)[] {
   return result;
 }
 
+/** Round to valid market tick size (SET rules for THB, $0.01 for USD/CNY, HKEX ticks for HKD) */
+export function roundMarketTick(price: number, currency = "THB"): number {
+  if (!Number.isFinite(price) || price <= 0) return 0;
+  if (currency === "USD" || currency === "CNY") {
+    return Number(price.toFixed(2));
+  }
+  if (currency === "HKD") {
+    const tick = price < 10 ? 0.01 : price < 20 ? 0.02 : price < 100 ? 0.05 : price < 200 ? 0.1 : 0.2;
+    return Number((Math.round(price / tick) * tick).toFixed(2));
+  }
+  return roundSetTick(price);
+}
+
 /** Round to valid Thai SET tick size */
 export function roundSetTick(price: number): number {
   if (!Number.isFinite(price) || price <= 0) return 0;
@@ -136,7 +149,7 @@ export function roundSetTick(price: number): number {
   return Number((Math.round(price / tick) * tick).toFixed(2));
 }
 
-export function computeTechnicalSummary(bars: OhlcvBar[]): StockTechnicalSummary {
+export function computeTechnicalSummary(bars: OhlcvBar[], currency = "THB"): StockTechnicalSummary {
   if (bars.length === 0) {
     return {
       price: 0,
@@ -201,24 +214,25 @@ export function computeTechnicalSummary(bars: OhlcvBar[]): StockTechnicalSummary
   const r1Raw = high20 > price * 1.01 ? high20 : price + atr14 * 1.8;
   const r2Raw = high60 > r1Raw * 1.01 ? high60 : r1Raw + atr14 * 1.8;
 
-  const s1 = roundSetTick(Math.max(0.01, s1Raw));
-  const s2 = roundSetTick(Math.max(0.01, s2Raw));
-  const r1 = roundSetTick(r1Raw);
-  const r2 = roundSetTick(r2Raw);
+  const s1 = roundMarketTick(Math.max(0.01, s1Raw), currency);
+  const s2 = roundMarketTick(Math.max(0.01, s2Raw), currency);
+  const r1 = roundMarketTick(r1Raw, currency);
+  const r2 = roundMarketTick(r2Raw, currency);
 
   // Standard 10D swing stop: anchored to ~1.6x ATR (or nearby S1 if within 2.5x ATR), clamped to 2.5%-6% risk
   const atrStop = price - Math.max(atr14 * 1.6, price * 0.025);
   const s1IsNearby = s1 < price - atr14 * 0.6 && s1 >= price - atr14 * 2.6;
   const rawStop = s1IsNearby ? Math.min(s1 * 0.995, atrStop) : atrStop;
-  const standardStop = roundSetTick(
-    Math.max(price * 0.94, Math.min(price * 0.975, rawStop))
+  const standardStop = roundMarketTick(
+    Math.max(price * 0.94, Math.min(price * 0.975, rawStop)),
+    currency
   );
 
   // Realistic 10D swing target: use R1 if it sits within a reachable swing range (1.3R .. 4.5x ATR), otherwise ~1.8R
   const risk = Math.max(price - standardStop, price * 0.02);
   const targetByRisk = price + risk * 1.8;
   const r1IsReachable = r1 >= price + risk * 1.3 && r1 <= price + Math.max(atr14 * 4.5, risk * 2.5);
-  const shortTarget = roundSetTick(r1IsReachable ? r1 : targetByRisk);
+  const shortTarget = roundMarketTick(r1IsReachable ? r1 : targetByRisk, currency);
 
   // Trend classification
   let trendLabel = "แกว่งออกข้าง (Sideways)";

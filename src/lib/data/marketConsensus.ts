@@ -1,8 +1,19 @@
 import { getOrFetch } from "../cache";
-import { getStockMeta, normalizeThaiSymbol } from "../set50";
-import type { IaaConsensusSummary, PeerMetricRow, StockFundamentals } from "../types";
-
-const TV_SCAN_URL = "https://scanner.tradingview.com/thailand/scan";
+import {
+  CHINA_UNIVERSE,
+  DR_UNIVERSE,
+  NASDAQ100_UNIVERSE,
+  resolveStockSymbol,
+  SP500_UNIVERSE,
+  type GlobalStockMeta,
+} from "../markets";
+import type {
+  CurrencyCode,
+  IaaConsensusSummary,
+  MarketId,
+  PeerMetricRow,
+  StockFundamentals,
+} from "../types";
 
 const TV_COLUMNS = [
   "name", // 0
@@ -43,6 +54,8 @@ interface TvScanResponse {
 
 export interface FullConsensusRecord {
   symbol: string;
+  market: MarketId;
+  currency: CurrencyCode;
   companyName: string;
   englishName: string;
   sector: string;
@@ -55,24 +68,24 @@ export interface FullConsensusRecord {
 }
 
 const SECTOR_EN_TO_TH: Record<string, string> = {
-  "Energy Minerals": "พลังงานและสาธารณูปโภค",
-  Utilities: "พลังงานและสาธารณูปโภค",
+  "Energy Minerals": "พลังงาน",
+  Utilities: "สาธารณูปโภค",
   Finance: "การเงินและธนาคาร",
-  "Retail Trade": "พาณิชย์",
-  "Health Services": "การแพทย์",
-  "Health Technology": "การแพทย์",
-  Communications: "เทคโนโลยีสารสนเทศและการสื่อสาร",
-  "Technology Services": "เทคโนโลยีสารสนเทศและการสื่อสาร",
-  "Electronic Technology": "ชิ้นส่วนอิเล็กทรอนิกส์",
+  "Retail Trade": "ค้าปลีกและอีคอมเมิร์ซ",
+  "Health Services": "การแพทย์และสุขภาพ",
+  "Health Technology": "เวชภัณฑ์และไบโอเทค",
+  Communications: "สื่อสารและแพลตฟอร์ม",
+  "Technology Services": "ซอฟต์แวร์และคลาวด์ AI",
+  "Electronic Technology": "เซมิคอนดักเตอร์และฮาร์ดแวร์",
   Transportation: "ขนส่งและโลจิสติกส์",
-  "Consumer Services": "การท่องเที่ยวและบริการ",
-  "Consumer Non-Durables": "อาหารและเครื่องดื่ม",
-  "Consumer Durables": "สินค้าอุปโภคบริโภค",
-  "Process Industries": "ปิโตรเคมีและบรรจุภัณฑ์",
-  "Non-Energy Minerals": "วัสดุก่อสร้างและเหมืองแร่",
-  "Industrial Services": "บริการรับเหมาและอุตสาหกรรม",
-  "Producer Manufacturing": "สินค้าอุตสาหกรรม",
-  "Commercial Services": "บริการเฉพาะกิจ",
+  "Consumer Services": "บริการและท่องเที่ยว",
+  "Consumer Non-Durables": "สินค้าอุปโภคบริโภคจำเป็น",
+  "Consumer Durables": "ยานยนต์ EV และสินค้าคงทน",
+  "Process Industries": "เคมีภัณฑ์และวัสดุ",
+  "Non-Energy Minerals": "เหมืองแร่และโลหะ",
+  "Industrial Services": "บริการอุตสาหกรรม",
+  "Producer Manufacturing": "การผลิตและอุตสาหกรรม",
+  "Commercial Services": "บริการธุรกิจ",
   "Distribution Services": "จัดจำหน่ายและค้าส่ง",
 };
 
@@ -81,10 +94,48 @@ function numOrNull(v: string | number | null | undefined, digits = 2): number | 
   return Number(v.toFixed(digits));
 }
 
-function mapTvRow(row: TvScanRow): FullConsensusRecord {
+function mapTvRow(
+  row: TvScanRow,
+  tvMarket: "thailand" | "america" | "hongkong" | "china",
+  marketHint: MarketId
+): FullConsensusRecord {
   const d = row.d;
-  const symbol = normalizeThaiSymbol(String(d[0] ?? row.s.replace(/^SET:/i, "")));
-  const meta = getStockMeta(symbol);
+  const rawName = String(d[0] ?? row.s.split(":")[1] ?? "");
+
+  let symbol = rawName.toUpperCase();
+  let currency: CurrencyCode = "USD";
+  let sourceLabel = "Wall Street Analyst Consensus (US Equities)";
+  let refUrl = `https://finance.yahoo.com/quote/${encodeURIComponent(symbol)}/analysis`;
+
+  if (tvMarket === "thailand") {
+    symbol = rawName.toUpperCase().replace(/\.BK$/i, "");
+    currency = "THB";
+    sourceLabel = "DR หุ้นต่างประเทศ (ข้อมูลราคาตลาด)";
+    refUrl = `https://finance.yahoo.com/quote/${encodeURIComponent(`${symbol}.BK`)}`;
+  } else if (tvMarket === "america") {
+    symbol = rawName.replace(".", "-").toUpperCase();
+    currency = "USD";
+    sourceLabel =
+      marketHint === "CHINA"
+        ? "Wall Street Analyst Consensus (China US ADR)"
+        : "Wall Street Analyst Consensus (US Equities)";
+    refUrl = `https://finance.yahoo.com/quote/${encodeURIComponent(symbol)}/analysis`;
+  } else if (tvMarket === "hongkong") {
+    const padded = rawName.replace(/\D/g, "").padStart(4, "0");
+    symbol = `${padded}.HK`;
+    currency = "HKD";
+    sourceLabel = "HKEX Analyst Consensus (Hong Kong)";
+    refUrl = `https://finance.yahoo.com/quote/${encodeURIComponent(symbol)}/analysis`;
+  } else {
+    const exchangePrefix = row.s.split(":")[0]?.toUpperCase();
+    const suffix = exchangePrefix === "SZSE" || !rawName.startsWith("6") ? "SZ" : "SS";
+    symbol = `${rawName}.${suffix}`;
+    currency = "CNY";
+    sourceLabel = "China A-Share Analyst Consensus (SSE / SZSE)";
+    refUrl = `https://finance.yahoo.com/quote/${encodeURIComponent(symbol)}/analysis`;
+  }
+
+  const globalMeta = resolveStockSymbol(symbol, marketHint);
   const englishName = String(d[1] ?? symbol);
   const price = typeof d[2] === "number" && Number.isFinite(d[2]) ? Number(d[2].toFixed(2)) : 0;
   const changePct = typeof d[3] === "number" && Number.isFinite(d[3]) ? Number(d[3].toFixed(2)) : 0;
@@ -118,16 +169,17 @@ function mapTvRow(row: TvScanRow): FullConsensusRecord {
   }
 
   const tvSector = String(d[22] ?? "");
-  const sector =
-    meta.sector !== "ตลาดหลักทรัพย์แห่งประเทศไทย (SET/mai)"
-      ? meta.sector
-      : SECTOR_EN_TO_TH[tvSector] ?? (tvSector || "SET / mai");
+  const sector = SECTOR_EN_TO_TH[tvSector] ?? (tvSector || globalMeta.sector);
   const industry = String(d[23] ?? sector);
   const now = new Date().toISOString();
 
+  const displayName = globalMeta.name !== symbol ? globalMeta.name : englishName;
+
   return {
     symbol,
-    companyName: meta.nameTh !== symbol ? `${meta.nameTh} (${englishName})` : englishName,
+    market: marketHint,
+    currency,
+    companyName: displayName,
     englishName,
     sector,
     industry,
@@ -136,7 +188,9 @@ function mapTvRow(row: TvScanRow): FullConsensusRecord {
     volume,
     consensus: {
       symbol,
-      companyName: meta.nameTh !== symbol ? meta.nameTh : englishName,
+      market: marketHint,
+      currency,
+      companyName: displayName,
       sector,
       currentPrice: price,
       avgTargetPrice: avgTarget,
@@ -150,8 +204,8 @@ function mapTvRow(row: TvScanRow): FullConsensusRecord {
       totalBrokers: Math.round(totalBrokers),
       buyRatioPct,
       recommendationKey,
-      source: "Consensus ตลาดหุ้นไทย (SET / Analyst Coverage)",
-      settradeUrl: `https://www.settrade.com/th/equities/quote/${encodeURIComponent(symbol)}/analyst-consensus`,
+      source: sourceLabel,
+      settradeUrl: refUrl,
       updatedAt: now,
     },
     fundamentals: {
@@ -165,44 +219,178 @@ function mapTvRow(row: TvScanRow): FullConsensusRecord {
       volumeRatio20d: null,
       fiftyTwoWeekHigh: numOrNull(d[20]),
       fiftyTwoWeekLow: numOrNull(d[21]),
-      cashBalanceStatus: "ปกติ (ตรวจสอบ ตลท. ล่าสุด)",
+      cashBalanceStatus:
+        marketHint === "DR" ? "DR หุ้นต่างประเทศ (ปกติ)" : "ตลาดต่างประเทศ (ปกติ)",
     },
   };
 }
 
-export async function fetchMarketConsensusAll(
+async function postTvScan(
+  tvMarket: "thailand" | "america" | "hongkong" | "china",
+  body: Record<string, unknown>,
+  timeoutMs = 8000
+): Promise<TvScanRow[]> {
+  const res = await fetch(`https://scanner.tradingview.com/${tvMarket}/scan`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    },
+    body: JSON.stringify({ ...body, columns: [...TV_COLUMNS] }),
+    signal: AbortSignal.timeout(timeoutMs),
+    cache: "no-store",
+  });
+  if (!res.ok) return [];
+  const json = (await res.json()) as TvScanResponse;
+  return json.data ?? [];
+}
+
+export async function fetchMarketConsensusByMarket(
+  market: MarketId,
   forceRefresh = false
 ): Promise<{ records: FullConsensusRecord[]; ok: boolean }> {
   return getOrFetch(
-    "consensus:set:all",
+    `consensus:global:v2:${market}`,
     15 * 60 * 1000,
     async () => {
       try {
-        const res = await fetch(TV_SCAN_URL, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-          },
-          body: JSON.stringify({
+        if (market === "DR") {
+          const drTickers = DR_UNIVERSE.map((d) => `SET:${d.tvName}`);
+          const rows = await postTvScan("thailand", {
+            symbols: { tickers: drTickers },
+          });
+          const records = rows
+            .map((r) => mapTvRow(r, "thailand", "DR"))
+            .filter((r) => r.price > 0);
+          return { records, ok: records.length > 0 };
+        }
+
+        if (market === "SP500") {
+          const rows = await postTvScan("america", {
             filter: [
-              { left: "exchange", operation: "equal", right: "SET" },
+              { left: "exchange", operation: "in_range", right: ["NYSE", "NASDAQ"] },
               { left: "price_target_average", operation: "nempty" },
+              { left: "market_cap_basic", operation: "greater", right: 15_000_000_000 },
             ],
             options: { lang: "en" },
             symbols: { query: { types: ["stock"] } },
-            sort: { sortBy: "recommendation_total", sortOrder: "desc" },
-            range: [0, 300],
-            columns: [...TV_COLUMNS],
-          }),
-          signal: AbortSignal.timeout(8000),
-          cache: "no-store",
-        });
+            sort: { sortBy: "market_cap_basic", sortOrder: "desc" },
+            range: [0, 220],
+          });
+          const spCoreSet = new Set(SP500_UNIVERSE.map((s) => s.symbol));
+          const records = rows
+            .map((r) => mapTvRow(r, "america", "SP500"))
+            .filter((r) => r.price > 0 && !r.symbol.includes("/"));
+          records.sort((a, b) => {
+            const aCore = spCoreSet.has(a.symbol) ? 1 : 0;
+            const bCore = spCoreSet.has(b.symbol) ? 1 : 0;
+            if (b.consensus.buyCount !== a.consensus.buyCount) {
+              return b.consensus.buyCount - a.consensus.buyCount;
+            }
+            return bCore - aCore;
+          });
+          return { records, ok: records.length > 0 };
+        }
 
-        if (!res.ok) return { records: [], ok: false };
-        const json = (await res.json()) as TvScanResponse;
-        const rows = json.data ?? [];
-        const records = rows.map(mapTvRow).filter((r) => r.price > 0);
+        if (market === "NASDAQ100") {
+          const ndxNames = NASDAQ100_UNIVERSE.map((s) => s.tvName);
+          const [coreRows, extraRows] = await Promise.all([
+            postTvScan("america", {
+              filter: [
+                { left: "exchange", operation: "equal", right: "NASDAQ" },
+                { left: "name", operation: "in_range", right: ndxNames },
+              ],
+              range: [0, 100],
+            }),
+            postTvScan("america", {
+              filter: [
+                { left: "exchange", operation: "equal", right: "NASDAQ" },
+                { left: "price_target_average", operation: "nempty" },
+                { left: "market_cap_basic", operation: "greater", right: 10_000_000_000 },
+              ],
+              symbols: { query: { types: ["stock"] } },
+              sort: { sortBy: "market_cap_basic", sortOrder: "desc" },
+              range: [0, 110],
+            }),
+          ]);
+
+          const seen = new Set<string>();
+          const records: FullConsensusRecord[] = [];
+          for (const row of [...coreRows, ...extraRows]) {
+            const mapped = mapTvRow(row, "america", "NASDAQ100");
+            if (mapped.price > 0 && !seen.has(mapped.symbol)) {
+              seen.add(mapped.symbol);
+              records.push(mapped);
+            }
+          }
+          return { records, ok: records.length > 0 };
+        }
+
+        if (market === "HK") {
+          const hkRows = await postTvScan("hongkong", {
+            filter: [
+              { left: "exchange", operation: "equal", right: "HKEX" },
+              { left: "price_target_average", operation: "nempty" },
+              { left: "recommendation_total", operation: "greater", right: 2 },
+            ],
+            symbols: { query: { types: ["stock"] } },
+            sort: { sortBy: "market_cap_basic", sortOrder: "desc" },
+            range: [0, 180],
+          });
+
+          const seen = new Set<string>();
+          const records: FullConsensusRecord[] = [];
+          for (const r of hkRows) {
+            const rawCode = String(r.d[0] ?? "");
+            // Skip HKEX dual-counter 8xxxx RMB duplicates (e.g. 80700)
+            if (/^8\d{4}$/.test(rawCode)) continue;
+            const m = mapTvRow(r, "hongkong", "HK");
+            if (m.price > 0 && !seen.has(m.symbol)) {
+              seen.add(m.symbol);
+              records.push(m);
+            }
+          }
+          return { records, ok: records.length > 0 };
+        }
+
+        // CHINA: Mainland A-Shares (SSE / SZSE) + China US ADRs
+        const adrNames = CHINA_UNIVERSE.filter((s) => s.tvMarket === "america").map((s) => s.tvName);
+        const [adrRows, aShareRows] = await Promise.all([
+          postTvScan("america", {
+            filter: [
+              { left: "name", operation: "in_range", right: adrNames },
+              { left: "exchange", operation: "in_range", right: ["NYSE", "NASDAQ"] },
+            ],
+            range: [0, 35],
+          }),
+          postTvScan("china", {
+            filter: [
+              { left: "price_target_average", operation: "nempty" },
+              { left: "recommendation_total", operation: "greater", right: 8 },
+            ],
+            symbols: { query: { types: ["stock"] } },
+            sort: { sortBy: "market_cap_basic", sortOrder: "desc" },
+            range: [0, 120],
+          }),
+        ]);
+
+        const seen = new Set<string>();
+        const records: FullConsensusRecord[] = [];
+        for (const r of adrRows) {
+          const m = mapTvRow(r, "america", "CHINA");
+          if (m.price > 0 && !seen.has(m.symbol)) {
+            seen.add(m.symbol);
+            records.push(m);
+          }
+        }
+        for (const r of aShareRows) {
+          const m = mapTvRow(r, "china", "CHINA");
+          if (m.price > 0 && !seen.has(m.symbol)) {
+            seen.add(m.symbol);
+            records.push(m);
+          }
+        }
+
         return { records, ok: records.length > 0 };
       } catch {
         return { records: [], ok: false };
@@ -214,32 +402,45 @@ export async function fetchMarketConsensusAll(
 
 export async function fetchSingleStockConsensusAndFundamentals(
   rawSymbol: string,
-  forceRefresh = false
+  forceRefresh = false,
+  hintMarket?: MarketId
 ): Promise<FullConsensusRecord | null> {
-  const symbol = normalizeThaiSymbol(rawSymbol);
+  const resolved: GlobalStockMeta = resolveStockSymbol(rawSymbol, hintMarket);
   return getOrFetch(
-    `consensus:single:${symbol}`,
+    `consensus:single:v2:${resolved.tvMarket}:${resolved.tvName}:${resolved.market}`,
     12 * 60 * 1000,
     async () => {
       try {
-        const res = await fetch(TV_SCAN_URL, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-          },
-          body: JSON.stringify({
-            symbols: { tickers: [`SET:${symbol}`] },
-            columns: [...TV_COLUMNS],
-          }),
-          signal: AbortSignal.timeout(6000),
-          cache: "no-store",
+        if (resolved.tvMarket === "thailand") {
+          const rows = await postTvScan("thailand", {
+            symbols: { tickers: [`SET:${resolved.tvName}`] },
+          });
+          return rows[0] ? mapTvRow(rows[0], "thailand", "DR") : null;
+        }
+
+        if (resolved.tvMarket === "hongkong") {
+          const rows = await postTvScan("hongkong", {
+            symbols: { tickers: [`HKEX:${resolved.tvName}`] },
+          });
+          return rows[0] ? mapTvRow(rows[0], "hongkong", "HK") : null;
+        }
+
+        if (resolved.tvMarket === "china") {
+          const exch = resolved.symbol.endsWith(".SZ") ? "SZSE" : "SSE";
+          const rows = await postTvScan("china", {
+            symbols: { tickers: [`${exch}:${resolved.tvName}`] },
+          });
+          return rows[0] ? mapTvRow(rows[0], "china", "CHINA") : null;
+        }
+
+        const rows = await postTvScan("america", {
+          filter: [
+            { left: "name", operation: "equal", right: resolved.tvName },
+            { left: "exchange", operation: "in_range", right: ["NASDAQ", "NYSE", "AMEX"] },
+          ],
+          range: [0, 3],
         });
-        if (!res.ok) return null;
-        const json = (await res.json()) as TvScanResponse;
-        const row = json.data?.[0];
-        if (!row) return null;
-        return mapTvRow(row);
+        return rows[0] ? mapTvRow(rows[0], "america", resolved.market) : null;
       } catch {
         return null;
       }
@@ -250,46 +451,95 @@ export async function fetchSingleStockConsensusAndFundamentals(
 
 export async function fetchPeerMetricsBatch(
   rawSymbols: string[],
-  forceRefresh = false
+  forceRefresh = false,
+  hintMarket?: MarketId
 ): Promise<PeerMetricRow[]> {
-  const symbols = Array.from(
-    new Set(rawSymbols.map(normalizeThaiSymbol).filter((s) => s.length >= 1))
-  ).slice(0, 12);
+  const resolvedList = Array.from(
+    new Map(
+      rawSymbols
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map((s) => {
+          const r = resolveStockSymbol(s, hintMarket);
+          return [r.symbol, r] as const;
+        })
+    ).values()
+  ).slice(0, 20);
 
-  if (symbols.length === 0) return [];
-  const cacheKey = `peers:${symbols.join(",")}`;
+  if (resolvedList.length === 0) return [];
+  const cacheKey = `peers:v3:${resolvedList.map((r) => `${r.tvMarket}:${r.symbol}`).join(",")}`;
 
   return getOrFetch(
     cacheKey,
     10 * 60 * 1000,
     async () => {
       try {
-        const res = await fetch(TV_SCAN_URL, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0",
-          },
-          body: JSON.stringify({
-            symbols: { tickers: symbols.map((s) => `SET:${s}`) },
-            columns: [...TV_COLUMNS],
-          }),
-          signal: AbortSignal.timeout(6000),
-          cache: "no-store",
-        });
-        if (!res.ok) return [];
-        const json = (await res.json()) as TvScanResponse;
-        const map = new Map<string, FullConsensusRecord>();
-        for (const row of json.data ?? []) {
-          const mapped = mapTvRow(row);
-          map.set(mapped.symbol, mapped);
+        const byTvMarket = {
+          thailand: resolvedList.filter((r) => r.tvMarket === "thailand"),
+          america: resolvedList.filter((r) => r.tvMarket === "america"),
+          hongkong: resolvedList.filter((r) => r.tvMarket === "hongkong"),
+          china: resolvedList.filter((r) => r.tvMarket === "china"),
+        };
+
+        const [drRows, usRows, hkRows, cnRows] = await Promise.all([
+          byTvMarket.thailand.length > 0
+            ? postTvScan("thailand", {
+                symbols: { tickers: byTvMarket.thailand.map((r) => `SET:${r.tvName}`) },
+              })
+            : Promise.resolve([]),
+          byTvMarket.america.length > 0
+            ? postTvScan("america", {
+                filter: [
+                  {
+                    left: "name",
+                    operation: "in_range",
+                    right: byTvMarket.america.map((r) => r.tvName),
+                  },
+                  { left: "exchange", operation: "in_range", right: ["NASDAQ", "NYSE", "AMEX"] },
+                ],
+                range: [0, 30],
+              })
+            : Promise.resolve([]),
+          byTvMarket.hongkong.length > 0
+            ? postTvScan("hongkong", {
+                symbols: { tickers: byTvMarket.hongkong.map((r) => `HKEX:${r.tvName}`) },
+              })
+            : Promise.resolve([]),
+          byTvMarket.china.length > 0
+            ? postTvScan("china", {
+                symbols: {
+                  tickers: byTvMarket.china.map(
+                    (r) => `${r.symbol.endsWith(".SZ") ? "SZSE" : "SSE"}:${r.tvName}`
+                  ),
+                },
+              })
+            : Promise.resolve([]),
+        ]);
+
+        const recordMap = new Map<string, FullConsensusRecord>();
+        for (const r of drRows) {
+          const m = mapTvRow(r, "thailand", "DR");
+          recordMap.set(m.symbol, m);
         }
-        return symbols.map((sym) => {
-          const found = map.get(sym);
-          const meta = getStockMeta(sym);
+        for (const r of usRows) {
+          const m = mapTvRow(r, "america", hintMarket === "CHINA" ? "CHINA" : "SP500");
+          recordMap.set(m.symbol, m);
+        }
+        for (const r of hkRows) {
+          const m = mapTvRow(r, "hongkong", "HK");
+          recordMap.set(m.symbol, m);
+        }
+        for (const r of cnRows) {
+          const m = mapTvRow(r, "china", "CHINA");
+          recordMap.set(m.symbol, m);
+        }
+
+        return resolvedList.map((res) => {
+          const found = recordMap.get(res.symbol);
           return {
-            symbol: sym,
-            companyName: found?.englishName ?? meta.nameTh,
+            symbol: res.symbol,
+            currency: res.currency,
+            companyName: found?.englishName ?? res.name,
             price: found?.price ?? null,
             changePct: found?.changePct ?? null,
             pe: found?.fundamentals.pe ?? null,

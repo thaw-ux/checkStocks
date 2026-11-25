@@ -1,3 +1,63 @@
+export type MarketId = "SP500" | "NASDAQ100" | "HK" | "CHINA" | "DR";
+export type CurrencyCode = "USD" | "HKD" | "CNY" | "THB";
+
+export interface FxRatesToThb {
+  USD: number;
+  HKD: number;
+  CNY: number;
+  THB: number;
+  updatedAt: string;
+}
+
+export interface SupportResistanceLevel {
+  label: string; // S1, S2, S3, R1, R2, R3
+  kind: "support" | "resistance";
+  price: number;
+  zoneLow: number;
+  zoneHigh: number;
+  distancePct: number; // positive % distance from current price
+  touches: number;
+  strength: number; // 1..5 stars
+  roleFlip: boolean;
+  sources: string[]; // e.g. ["Swing Pivot", "Volume POC", "Fib 61.8%", "EMA 200"]
+}
+
+export interface FibLevel {
+  ratio: number;
+  label: string;
+  price: number;
+}
+
+export interface SupportResistanceMap {
+  timeframe: "day" | "week";
+  price: number;
+  pocPrice: number;
+  supports: SupportResistanceLevel[];
+  resistances: SupportResistanceLevel[];
+  fibLevels: FibLevel[];
+  fibSwingHigh: number;
+  fibSwingLow: number;
+  nearestSupportDistPct: number | null;
+  nearestResistanceDistPct: number | null;
+  zonePositionPct: number; // 0..100 between S1 and R1
+  zoneLabelTh: string;
+}
+
+export interface IndexSrRadarItem {
+  symbol: string;
+  displaySymbol: string;
+  labelTh: string;
+  flag: string;
+  market: MarketId;
+  price: number;
+  changePct: number;
+  trendLabel: string;
+  trendBias: "bullish" | "neutral" | "bearish";
+  rsi14: number | null;
+  srDaily: SupportResistanceMap;
+  srWeekly: SupportResistanceMap;
+}
+
 export interface OhlcvBar {
   time: string; // YYYY-MM-DD for daily, ISO or unix string for intraday
   timestamp: number; // unix seconds
@@ -20,7 +80,7 @@ export interface DataAuditItem {
 export interface GlobalMacroItem {
   symbol: string;
   labelTh: string;
-  category: "thai" | "us" | "asia" | "commodity" | "fx_bond";
+  category: "us" | "hk_cn" | "volatility" | "commodity" | "fx_bond";
   price: number;
   change: number;
   changePct: number;
@@ -41,6 +101,8 @@ export interface NewsItem {
 
 export interface AffectedStockItem {
   symbol: string;
+  market?: MarketId;
+  currency?: CurrencyCode;
   sector: string;
   sentiment: "positive" | "neutral" | "negative";
   reason: string;
@@ -56,6 +118,8 @@ export interface DailyBriefingSection {
 
 export interface MarketOverviewPayload {
   macroCards: GlobalMacroItem[];
+  fxRates?: FxRatesToThb;
+  indexSrRadar?: IndexSrRadarItem[];
   briefing: {
     headline: string;
     mood: "Risk-On" | "Neutral" | "Risk-Off";
@@ -84,6 +148,8 @@ export interface NewsImpactResult {
 export interface BrokerReportItem {
   id: string;
   symbol: string;
+  market?: MarketId;
+  currency?: CurrencyCode;
   broker: string;
   rating: string;
   ratingNormalized: "Buy" | "Hold" | "Sell";
@@ -99,6 +165,8 @@ export interface BrokerReportItem {
 
 export interface IaaConsensusSummary {
   symbol: string;
+  market?: MarketId;
+  currency?: CurrencyCode;
   companyName: string;
   sector: string;
   currentPrice: number;
@@ -200,6 +268,9 @@ export interface PdfQuoteExtract {
 export interface StockAnalysisPayload {
   symbol: string;
   yahooSymbol: string;
+  market: MarketId;
+  currency: CurrencyCode;
+  lotSize: number;
   companyName: string;
   sector: string;
   industry: string;
@@ -214,6 +285,8 @@ export interface StockAnalysisPayload {
   aiSynthesis: StockAiSynthesis;
   factSheetMarkdown: string;
   dataAudit: DataAuditItem[];
+  srDaily: SupportResistanceMap;
+  srWeekly: SupportResistanceMap;
   bars: OhlcvBar[];
   intradayBars?: OhlcvBar[];
   defaultPeers: string[];
@@ -263,11 +336,18 @@ export interface TimeMachineResult {
 
 export interface TechnicalSetupItem {
   symbol: string;
+  market?: MarketId;
+  currency?: CurrencyCode;
   companyName: string;
   sector: string;
   price: number;
   changePct1d: number;
-  setupType: "Breakout + Volume" | "Pullback > EMA200" | "Oversold Rebound";
+  setupType:
+    | "Breakout + Volume"
+    | "Pullback > EMA200"
+    | "Oversold Rebound"
+    | "Near Support (S1)"
+    | "Near Resistance (R1)";
   entry: number;
   stop: number;
   target: number;
@@ -275,12 +355,21 @@ export interface TechnicalSetupItem {
   rsi14: number;
   volRatio: number;
   ema200DistPct: number | null;
+  s1: number;
+  s1DistPct: number;
+  s1Strength: number;
+  r1: number;
+  r1DistPct: number;
+  r1Strength: number;
+  pocPrice: number;
+  zonePositionPct: number;
   reasonTh: string;
 }
 
 export interface NewsPickItem {
   rank: number;
   symbol: string;
+  market?: MarketId;
   companyName: string;
   sector: string;
   mentionCount: number;
@@ -291,6 +380,7 @@ export interface NewsPickItem {
 
 export interface PeerMetricRow {
   symbol: string;
+  currency?: CurrencyCode;
   companyName: string;
   price: number | null;
   changePct: number | null;
@@ -333,6 +423,7 @@ export interface DimensionScore {
 export interface WeeklyPortfolioPick {
   rank: number;
   symbol: string;
+  currency?: CurrencyCode;
   companyName: string;
   sector: string;
   weightPct: number;
@@ -371,6 +462,9 @@ export interface WeeklyBacktestPoint {
 }
 
 export interface WeeklyPortfolioPayload {
+  market: MarketId;
+  currency: CurrencyCode;
+  benchmarkLabel: string;
   weekLabel: string;
   mondayDate: string;
   asOfDate: string;
@@ -395,6 +489,8 @@ export interface WeeklyPortfolioPayload {
 
 export interface TradePlanCardData {
   symbol: string;
+  market?: MarketId;
+  currency?: CurrencyCode;
   action: string;
   entry: number;
   stop: number;
@@ -408,10 +504,12 @@ export interface TradePlanCardData {
 export interface PaperTradeEntry {
   id: string;
   symbol: string;
+  market?: MarketId;
+  currency?: CurrencyCode;
   status: "open" | "closed";
   entryPrice: number;
   exitPrice?: number;
-  shares: number; // Board lot multiples of 100
+  shares: number;
   stopLoss: number;
   targetPrice: number;
   entryDate: string;

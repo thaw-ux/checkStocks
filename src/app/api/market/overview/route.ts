@@ -3,7 +3,8 @@ import { generateDailyBriefingAI } from "@/lib/ai/gemini";
 import { getOrFetch } from "@/lib/cache";
 import { fetchPeerMetricsBatch } from "@/lib/data/marketConsensus";
 import { fetchAllCategorizedNews } from "@/lib/data/news";
-import { fetchGlobalMacro12 } from "@/lib/data/yahoo";
+import { fetchFxRatesToThb, fetchGlobalMacro12, fetchIndexSrRadar5 } from "@/lib/data/yahoo";
+import { resolveStockSymbol } from "@/lib/markets";
 import type { DataAuditItem, MarketOverviewPayload } from "@/lib/types";
 
 export async function GET(request: Request) {
@@ -13,13 +14,15 @@ export async function GET(request: Request) {
     const modelOverride = searchParams.get("model") || undefined;
 
     const payload = await getOrFetch<MarketOverviewPayload>(
-      `api:market:overview:${modelOverride ?? "default"}`,
+      `api:market:overview:global:v2:${modelOverride ?? "default"}`,
       10 * 60 * 1000,
       async () => {
         const now = new Date().toISOString();
-        const [macroCards, categorizedNews] = await Promise.all([
+        const [macroCards, fxRates, categorizedNews, indexSrRadar] = await Promise.all([
           fetchGlobalMacro12(forceRefresh),
+          fetchFxRatesToThb(forceRefresh),
           fetchAllCategorizedNews(forceRefresh),
+          fetchIndexSrRadar5(forceRefresh),
         ]);
 
         const totalHeadlines = Object.values(categorizedNews).reduce(
@@ -33,15 +36,19 @@ export async function GET(request: Request) {
           modelOverride,
         });
 
-        // Enrich affected stocks with live SET prices
+        // Enrich affected international stocks with live prices & native currency
         const affectedSymbols = aiResult.affectedStocks.map((s) => s.symbol);
         const liveMetrics = await fetchPeerMetricsBatch(affectedSymbols, forceRefresh);
         const metricMap = new Map(liveMetrics.map((m) => [m.symbol, m]));
 
         const affectedStocks = aiResult.affectedStocks.map((s) => {
-          const live = metricMap.get(s.symbol);
+          const meta = resolveStockSymbol(s.symbol, s.market);
+          const live = metricMap.get(meta.symbol);
           return {
             ...s,
+            symbol: meta.symbol,
+            market: s.market ?? meta.market,
+            currency: live?.currency ?? s.currency ?? meta.currency,
             price: live?.price ?? undefined,
             changePct: live?.changePct ?? undefined,
           };
@@ -50,25 +57,26 @@ export async function GET(request: Request) {
         const dataAudit: DataAuditItem[] = [
           {
             id: "macro",
-            label: "ดัชนีตลาดโลก & ทอง/น้ำมัน/บาท (Yahoo Finance)",
-            status: macroCards.length >= 10 ? "live" : macroCards.length > 0 ? "partial" : "unavailable",
-            detail: `ดึงข้อมูลสำเร็จ ${macroCards.length}/12 ตัวชี้วัด (ดีเลย์ ~15 นาที)`,
-            url: "https://finance.yahoo.com/quote/%5ESET.BK",
+            label: "ดัชนีตลาดโลก & อัตราแลกเปลี่ยน (Yahoo Finance)",
+            status:
+              macroCards.length >= 10 ? "live" : macroCards.length > 0 ? "partial" : "unavailable",
+            detail: `ดึงข้อมูลสำเร็จ ${macroCards.length}/12 ตัวชี้วัด (USD/THB ${fxRates.USD.toFixed(2)} · HKD/THB ${fxRates.HKD.toFixed(2)})`,
+            url: "https://finance.yahoo.com/quote/%5EGSPC",
             timestamp: now,
           },
           {
             id: "news",
-            label: "ข่าวหุ้นไทย & โพยโบรกเกอร์ 7 หมวด (RSS สด)",
+            label: "ข่าวการเงินต่างประเทศ & Wall Street Calls 7 หมวด (RSS สด)",
             status: totalHeadlines >= 15 ? "live" : totalHeadlines > 0 ? "partial" : "unavailable",
-            detail: `รวบรวมพาดหัวสาธารณะ ${totalHeadlines} รายการจากข่าวหุ้น/มิติหุ้น/HoonSmart/Google News`,
+            detail: `รวบรวมพาดหัวข่าวสหรัฐฯ ฮ่องกง จีน และมหภาคโลก ${totalHeadlines} รายการล่าสุด`,
             timestamp: now,
           },
           {
             id: "ai_brief",
-            label: `AI Daily Briefing (${aiResult.modelUsed})`,
+            label: `Global Morning Briefing (${aiResult.modelUsed})`,
             status: aiResult.isAiGenerated ? "live" : "partial",
             detail: aiResult.isAiGenerated
-              ? "สังเคราะห์ครบ 6 มิติด้วย Google Gemini API"
+              ? "สังเคราะห์ข่าวโลกครบ 6 มิติเป็นภาษาไทยด้วย Google Gemini API"
               : "โหมดสรุป Rule-Based (ใส่ GEMINI_API_KEY เพื่อเปิด AI เต็มรูปแบบ)",
             timestamp: now,
           },
@@ -76,6 +84,8 @@ export async function GET(request: Request) {
 
         return {
           macroCards,
+          fxRates,
+          indexSrRadar,
           briefing: {
             headline: aiResult.headline,
             mood: aiResult.mood,
@@ -96,7 +106,7 @@ export async function GET(request: Request) {
     return NextResponse.json(payload);
   } catch (err) {
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "ไม่สามารถโหลดภาพรวมตลาดได้" },
+      { error: err instanceof Error ? err.message : "ไม่สามารถโหลดภาพรวมตลาดโลกได้" },
       { status: 500 }
     );
   }

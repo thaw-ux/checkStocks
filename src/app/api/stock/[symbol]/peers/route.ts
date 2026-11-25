@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { fetchPeerMetricsBatch } from "@/lib/data/marketConsensus";
-import { getDefaultPeers, normalizeThaiSymbol } from "@/lib/set50";
-import type { PeerMetricRow } from "@/lib/types";
+import { getDefaultGlobalPeers, resolveStockSymbol } from "@/lib/markets";
+import type { MarketId, PeerMetricRow } from "@/lib/types";
 
 function avg(nums: (number | null)[]): number | null {
   const valid = nums.filter((n): n is number => typeof n === "number" && Number.isFinite(n));
@@ -15,25 +15,36 @@ export async function GET(
 ) {
   try {
     const { symbol: rawParam } = await context.params;
-    const symbol = normalizeThaiSymbol(rawParam);
     const { searchParams } = new URL(request.url);
+    const marketRaw = searchParams.get("market");
+    const marketHint: MarketId | undefined =
+      marketRaw === "SP500" ||
+      marketRaw === "NASDAQ100" ||
+      marketRaw === "HK" ||
+      marketRaw === "CHINA" ||
+      marketRaw === "DR"
+        ? marketRaw
+        : undefined;
+
+    const resolved = resolveStockSymbol(decodeURIComponent(rawParam), marketHint);
     const customPeers = searchParams.get("peers");
 
     const peerList = customPeers
       ? customPeers
           .split(",")
-          .map((s) => normalizeThaiSymbol(s))
+          .map((s) => s.trim().toUpperCase())
           .filter(Boolean)
-      : getDefaultPeers(symbol);
+      : getDefaultGlobalPeers(resolved);
 
-    const rows = await fetchPeerMetricsBatch(peerList);
+    const rows = await fetchPeerMetricsBatch(peerList, false, resolved.market);
 
     const sectorAverage: PeerMetricRow = {
       symbol: "📌 ค่าเฉลี่ยกลุ่ม",
+      currency: resolved.currency,
       companyName: `ค่าเฉลี่ย (${rows.length} บริษัท)`,
       price: null,
       changePct: avg(rows.map((r) => r.changePct)),
-      pe: avg(rows.map((r) => (r.pe && r.pe > 0 && r.pe < 200 ? r.pe : null))),
+      pe: avg(rows.map((r) => (r.pe && r.pe > 0 && r.pe < 250 ? r.pe : null))),
       pbv: avg(rows.map((r) => r.pbv)),
       roe: avg(rows.map((r) => r.roe)),
       dividendYield: avg(rows.map((r) => r.dividendYield)),
@@ -41,7 +52,8 @@ export async function GET(
     };
 
     return NextResponse.json({
-      symbol,
+      symbol: resolved.symbol,
+      market: resolved.market,
       peers: peerList,
       rows,
       sectorAverage,

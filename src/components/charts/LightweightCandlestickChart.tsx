@@ -23,7 +23,8 @@ import {
   YAxis,
 } from "recharts";
 import { calcEMA, calcMACD, calcRSI } from "@/lib/quant/indicators";
-import type { OhlcvBar } from "@/lib/types";
+import { aggregateWeeklyBars } from "@/lib/quant/supportResistance";
+import type { OhlcvBar, SupportResistanceMap } from "@/lib/types";
 
 interface Props {
   symbol: string;
@@ -31,11 +32,15 @@ interface Props {
   entry?: number;
   stop?: number;
   target?: number;
+  srDaily?: SupportResistanceMap;
+  srWeekly?: SupportResistanceMap;
+  srTimeframe?: "day" | "week";
+  onChangeSrTimeframe?: (tf: "day" | "week") => void;
   theme: "dark" | "light";
   expanded?: boolean;
 }
 
-type RangeOpt = "1M" | "3M" | "6M" | "1Y";
+type RangeOpt = "1M" | "3M" | "6M" | "1Y" | "2Y";
 
 export function LightweightCandlestickChart({
   symbol,
@@ -43,29 +48,61 @@ export function LightweightCandlestickChart({
   entry,
   stop,
   target,
+  srDaily,
+  srWeekly,
+  srTimeframe = "day",
+  onChangeSrTimeframe,
   theme,
   expanded = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const [range, setRange] = useState<RangeOpt>("6M");
+  const [showSrLines, setShowSrLines] = useState(true);
+  const [showPoc, setShowPoc] = useState(true);
+  const [showFib, setShowFib] = useState(false);
   const [showPlanLines, setShowPlanLines] = useState(true);
   const [showOscillators, setShowOscillators] = useState(false);
 
+  const activeSr = srTimeframe === "week" ? srWeekly : srDaily;
+
   const slicedData = useMemo(() => {
-    const closes = bars.map((b) => b.close);
+    const baseBars = srTimeframe === "week" ? aggregateWeeklyBars(bars) : bars;
+    const closes = baseBars.map((b) => b.close);
     const ema20 = calcEMA(closes, 20);
     const ema50 = calcEMA(closes, 50);
-    const ema200 = calcEMA(closes, 200);
+    const ema200 = calcEMA(closes, Math.min(200, Math.max(20, baseBars.length - 1)));
     const rsi14 = calcRSI(closes, 14);
     const macdObj = calcMACD(closes, 12, 26, 9);
 
-    const lookback =
-      range === "1M" ? 22 : range === "3M" ? 65 : range === "6M" ? 130 : bars.length;
-    const startIdx = Math.max(0, bars.length - lookback);
+    let lookback = baseBars.length;
+    if (srTimeframe === "day") {
+      lookback =
+        range === "1M"
+          ? 22
+          : range === "3M"
+            ? 65
+            : range === "6M"
+              ? 130
+              : range === "1Y"
+                ? 255
+                : baseBars.length;
+    } else {
+      lookback =
+        range === "1M"
+          ? 12
+          : range === "3M"
+            ? 24
+            : range === "6M"
+              ? 40
+              : range === "1Y"
+                ? 60
+                : baseBars.length;
+    }
+    const startIdx = Math.max(0, baseBars.length - lookback);
 
     return {
-      bars: bars.slice(startIdx),
+      bars: baseBars.slice(startIdx),
       ema20: ema20.slice(startIdx),
       ema50: ema50.slice(startIdx),
       ema200: ema200.slice(startIdx),
@@ -74,7 +111,7 @@ export function LightweightCandlestickChart({
       macdSignal: macdObj.signal.slice(startIdx),
       macdHist: macdObj.histogram.slice(startIdx),
     };
-  }, [bars, range]);
+  }, [bars, range, srTimeframe]);
 
   const oscData = useMemo(() => {
     return slicedData.bars.map((b, i) => ({
@@ -94,7 +131,7 @@ export function LightweightCandlestickChart({
     const isDark = theme === "dark";
     const chart = createChart(el, {
       width: el.clientWidth,
-      height: expanded ? 480 : 360,
+      height: expanded ? 500 : 380,
       layout: {
         background: { type: ColorType.Solid, color: isDark ? "#0b1120" : "#ffffff" },
         textColor: isDark ? "#94a3b8" : "#475569",
@@ -104,16 +141,9 @@ export function LightweightCandlestickChart({
         vertLines: { color: isDark ? "rgba(30, 41, 59, 0.7)" : "rgba(226, 232, 240, 0.8)" },
         horzLines: { color: isDark ? "rgba(30, 41, 59, 0.7)" : "rgba(226, 232, 240, 0.8)" },
       },
-      crosshair: {
-        mode: 0,
-      },
-      rightPriceScale: {
-        borderColor: isDark ? "#1e293b" : "#e2e8f0",
-      },
-      timeScale: {
-        borderColor: isDark ? "#1e293b" : "#e2e8f0",
-        timeVisible: false,
-      },
+      crosshair: { mode: 0 },
+      rightPriceScale: { borderColor: isDark ? "#1e293b" : "#e2e8f0" },
+      timeScale: { borderColor: isDark ? "#1e293b" : "#e2e8f0", timeVisible: false },
     });
     chartRef.current = chart;
 
@@ -135,7 +165,6 @@ export function LightweightCandlestickChart({
       }))
     );
 
-    // Volume histogram at bottom 22%
     const volSeries = chart.addSeries(HistogramSeries, {
       priceFormat: { type: "volume" },
       priceScaleId: "",
@@ -147,14 +176,15 @@ export function LightweightCandlestickChart({
       slicedData.bars.map((b) => ({
         time: b.time as Time,
         value: b.volume,
-        color: b.close >= b.open ? "rgba(16, 185, 129, 0.35)" : "rgba(244, 63, 94, 0.35)",
+        color: b.close >= b.open ? "rgba(16, 185, 129, 0.32)" : "rgba(244, 63, 94, 0.32)",
       }))
     );
 
-    // EMA 20 / 50 / 200
     const addEma = (arr: (number | null)[], color: string, title: string) => {
       const pts = slicedData.bars
-        .map((b, i) => (arr[i] !== null ? { time: b.time as Time, value: Number(arr[i]!.toFixed(2)) } : null))
+        .map((b, i) =>
+          arr[i] !== null ? { time: b.time as Time, value: Number(arr[i]!.toFixed(2)) } : null
+        )
         .filter((x): x is { time: Time; value: number } => x !== null);
       if (pts.length < 2) return;
       const line = chart.addSeries(LineSeries, {
@@ -169,8 +199,63 @@ export function LightweightCandlestickChart({
 
     addEma(slicedData.ema20, "#38bdf8", "EMA20");
     addEma(slicedData.ema50, "#f59e0b", "EMA50");
-    addEma(slicedData.ema200, "#a855f7", "EMA200");
+    if (srTimeframe === "day") {
+      addEma(slicedData.ema200, "#a855f7", "EMA200");
+    }
 
+    // Smart Confluence S1-S3 & R1-R3 lines
+    if (showSrLines && activeSr) {
+      activeSr.supports.forEach((lvl, idx) => {
+        candleSeries.createPriceLine({
+          price: lvl.price,
+          color: idx === 0 ? "#10b981" : idx === 1 ? "rgba(16, 185, 129, 0.72)" : "rgba(16, 185, 129, 0.45)",
+          lineWidth: idx === 0 ? 2 : 1,
+          lineStyle: idx === 0 ? LineStyle.Solid : LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: `${lvl.label} (${"★".repeat(Math.min(3, lvl.strength))})`,
+        });
+      });
+      activeSr.resistances.forEach((lvl, idx) => {
+        candleSeries.createPriceLine({
+          price: lvl.price,
+          color: idx === 0 ? "#f43f5e" : idx === 1 ? "rgba(249, 115, 22, 0.8)" : "rgba(244, 63, 94, 0.45)",
+          lineWidth: idx === 0 ? 2 : 1,
+          lineStyle: idx === 0 ? LineStyle.Solid : LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: `${lvl.label} (${"★".repeat(Math.min(3, lvl.strength))})`,
+        });
+      });
+    }
+
+    // Volume Profile POC line
+    if (showPoc && activeSr && activeSr.pocPrice > 0) {
+      candleSeries.createPriceLine({
+        price: activeSr.pocPrice,
+        color: "#eab308",
+        lineWidth: 2,
+        lineStyle: LineStyle.LargeDashed,
+        axisLabelVisible: true,
+        title: "POC",
+      });
+    }
+
+    // Key Fibonacci lines (38.2%, 50.0%, 61.8%)
+    if (showFib && activeSr) {
+      activeSr.fibLevels
+        .filter((f) => f.ratio === 0.382 || f.ratio === 0.5 || f.ratio === 0.618)
+        .forEach((f) => {
+          candleSeries.createPriceLine({
+            price: f.price,
+            color: "#818cf8",
+            lineWidth: 1,
+            lineStyle: LineStyle.Dotted,
+            axisLabelVisible: true,
+            title: f.label,
+          });
+        });
+    }
+
+    // Trade Plan Lines (Entry / Stop / Target)
     if (showPlanLines) {
       if (entry && entry > 0) {
         candleSeries.createPriceLine({
@@ -185,9 +270,9 @@ export function LightweightCandlestickChart({
       if (stop && stop > 0) {
         candleSeries.createPriceLine({
           price: stop,
-          color: "#f43f5e",
+          color: "#fb7185",
           lineWidth: 2,
-          lineStyle: LineStyle.Dashed,
+          lineStyle: LineStyle.SparseDotted,
           axisLabelVisible: true,
           title: "STOP",
         });
@@ -195,9 +280,9 @@ export function LightweightCandlestickChart({
       if (target && target > 0) {
         candleSeries.createPriceLine({
           price: target,
-          color: "#10b981",
+          color: "#34d399",
           lineWidth: 2,
-          lineStyle: LineStyle.Dashed,
+          lineStyle: LineStyle.SparseDotted,
           axisLabelVisible: true,
           title: "TARGET",
         });
@@ -220,14 +305,57 @@ export function LightweightCandlestickChart({
       chart.remove();
       chartRef.current = null;
     };
-  }, [slicedData, showPlanLines, entry, stop, target, theme, expanded]);
+  }, [
+    slicedData,
+    showSrLines,
+    showPoc,
+    showFib,
+    showPlanLines,
+    activeSr,
+    entry,
+    stop,
+    target,
+    theme,
+    expanded,
+    srTimeframe,
+  ]);
 
   return (
     <div className="space-y-3">
       {/* Controls bar */}
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5">
-          {(["1M", "3M", "6M", "1Y"] as RangeOpt[]).map((r) => (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {onChangeSrTimeframe && (
+            <div className="inline-flex rounded-lg bg-slate-200/75 dark:bg-slate-800 p-0.5 mr-1">
+              <button
+                type="button"
+                onClick={() => onChangeSrTimeframe("day")}
+                className={`px-2.5 py-1 rounded-md text-xs font-bold cursor-pointer ${
+                  srTimeframe === "day"
+                    ? "bg-sky-500 text-slate-950"
+                    : "text-slate-600 dark:text-slate-300"
+                }`}
+              >
+                Day
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onChangeSrTimeframe("week");
+                  setRange("2Y");
+                }}
+                className={`px-2.5 py-1 rounded-md text-xs font-bold cursor-pointer ${
+                  srTimeframe === "week"
+                    ? "bg-sky-500 text-slate-950"
+                    : "text-slate-600 dark:text-slate-300"
+                }`}
+              >
+                Week
+              </button>
+            </div>
+          )}
+
+          {(["1M", "3M", "6M", "1Y", "2Y"] as RangeOpt[]).map((r) => (
             <button
               key={r}
               type="button"
@@ -244,17 +372,35 @@ export function LightweightCandlestickChart({
         </div>
 
         <div className="flex flex-wrap items-center gap-3 text-xs">
-          <div className="flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
-            <span className="inline-flex items-center gap-1">
-              <span className="h-2 w-2 rounded-full bg-sky-400" /> EMA20
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <span className="h-2 w-2 rounded-full bg-amber-400" /> EMA50
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <span className="h-2 w-2 rounded-full bg-purple-400" /> EMA200
-            </span>
-          </div>
+          <label className="inline-flex items-center gap-1.5 cursor-pointer select-none text-emerald-600 dark:text-emerald-400 font-semibold">
+            <input
+              type="checkbox"
+              checked={showSrLines}
+              onChange={(e) => setShowSrLines(e.target.checked)}
+              className="accent-emerald-500 rounded"
+            />
+            <span>แนวรับ-ต้าน (S1-S3/R1-R3)</span>
+          </label>
+
+          <label className="inline-flex items-center gap-1.5 cursor-pointer select-none text-amber-600 dark:text-amber-400 font-semibold">
+            <input
+              type="checkbox"
+              checked={showPoc}
+              onChange={(e) => setShowPoc(e.target.checked)}
+              className="accent-amber-500 rounded"
+            />
+            <span>POC</span>
+          </label>
+
+          <label className="inline-flex items-center gap-1.5 cursor-pointer select-none text-indigo-500 font-semibold">
+            <input
+              type="checkbox"
+              checked={showFib}
+              onChange={(e) => setShowFib(e.target.checked)}
+              className="accent-indigo-500 rounded"
+            />
+            <span>Fib</span>
+          </label>
 
           <label className="inline-flex items-center gap-1.5 cursor-pointer select-none text-slate-700 dark:text-slate-300">
             <input
@@ -263,7 +409,7 @@ export function LightweightCandlestickChart({
               onChange={(e) => setShowPlanLines(e.target.checked)}
               className="accent-sky-500 rounded"
             />
-            <span>เส้นแผน ENTRY / STOP / TARGET</span>
+            <span>เส้นแผน</span>
           </label>
 
           <label className="inline-flex items-center gap-1.5 cursor-pointer select-none text-slate-700 dark:text-slate-300">
@@ -273,18 +419,33 @@ export function LightweightCandlestickChart({
               onChange={(e) => setShowOscillators(e.target.checked)}
               className="accent-sky-500 rounded"
             />
-            <span>แสดง RSI / MACD</span>
+            <span>RSI / MACD</span>
           </label>
         </div>
       </div>
 
       {/* Main TradingView Candlestick Chart */}
       <div className="rounded-xl overflow-hidden border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0b1120]">
-        <div className="px-3 py-1.5 border-b border-slate-200/70 dark:border-slate-800/80 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
+        <div className="px-3 py-1.5 border-b border-slate-200/70 dark:border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
           <span className="font-semibold text-slate-700 dark:text-slate-200">
-            {symbol}.BK · กราฟแท่งเทียน TradingView ({range})
+            {symbol} · กราฟแท่งเทียน {srTimeframe === "week" ? "Weekly" : "Daily"} ({range})
           </span>
-          <span>ลากเพื่อเลื่อน · ซูมด้วยล้อเมาส์</span>
+          <div className="flex items-center gap-2.5 text-[10px]">
+            <span className="inline-flex items-center gap-1">
+              <span className="h-2 w-2 rounded-full bg-sky-400" /> EMA20
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <span className="h-2 w-2 rounded-full bg-amber-400" /> EMA50
+            </span>
+            {srTimeframe === "day" && (
+              <span className="inline-flex items-center gap-1">
+                <span className="h-2 w-2 rounded-full bg-purple-400" /> EMA200
+              </span>
+            )}
+            <span className="inline-flex items-center gap-1">
+              <span className="h-2 w-2 rounded-full bg-yellow-400" /> POC
+            </span>
+          </div>
         </div>
         <div ref={containerRef} className="w-full" />
       </div>

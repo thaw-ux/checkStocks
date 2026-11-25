@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import { analyzeUploadedBrokerPdfAI } from "@/lib/ai/gemini";
 import { extractTextFromPdfBuffer } from "@/lib/data/pdf";
 import { fetchYahooChart } from "@/lib/data/yahoo";
-import { normalizeThaiSymbol, toYahooSymbol } from "@/lib/set50";
+import { resolveStockSymbol } from "@/lib/markets";
+import type { MarketId } from "@/lib/types";
 
 export async function POST(
   request: Request,
@@ -10,10 +11,20 @@ export async function POST(
 ) {
   try {
     const { symbol: rawParam } = await context.params;
-    const symbol = normalizeThaiSymbol(rawParam);
     const formData = await request.formData();
     const file = formData.get("file");
     const modelOverride = (formData.get("model") as string | null) || undefined;
+    const marketRaw = formData.get("market") as string | null;
+    const marketHint: MarketId | undefined =
+      marketRaw === "SP500" ||
+      marketRaw === "NASDAQ100" ||
+      marketRaw === "HK" ||
+      marketRaw === "CHINA" ||
+      marketRaw === "DR"
+        ? marketRaw
+        : undefined;
+
+    const resolved = resolveStockSymbol(decodeURIComponent(rawParam), marketHint);
 
     if (!(file instanceof File)) {
       return NextResponse.json({ error: "กรุณาเลือกไฟล์ PDF บทวิเคราะห์ก่อนอัปโหลด" }, { status: 400 });
@@ -32,11 +43,12 @@ export async function POST(
       );
     }
 
-    const chart = await fetchYahooChart(toYahooSymbol(symbol), "5d", "1d");
+    const chart = await fetchYahooChart(resolved.yahooSymbol, "5d", "1d", false, true);
     const currentPrice = chart.meta?.regularMarketPrice || chart.bars.at(-1)?.close || 0;
 
     const analysis = await analyzeUploadedBrokerPdfAI({
-      symbol,
+      symbol: resolved.symbol,
+      currency: resolved.currency,
       fileName: file.name,
       extractedText,
       currentPrice,

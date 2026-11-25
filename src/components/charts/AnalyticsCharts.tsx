@@ -74,9 +74,11 @@ export function IaaStackedBarChart({
 export function Backtest12WChart({
   points,
   theme,
+  benchmarkLabel = "S&P 500",
 }: {
   points: WeeklyBacktestPoint[];
   theme: "dark" | "light";
+  benchmarkLabel?: string;
 }) {
   if (points.length === 0) return null;
 
@@ -108,7 +110,7 @@ export function Backtest12WChart({
           <Line
             type="monotone"
             dataKey="cumulativeSetPct"
-            name="SET Index สะสม (%)"
+            name={`${benchmarkLabel} สะสม (%)`}
             stroke="#94a3b8"
             strokeWidth={2}
             strokeDasharray="5 4"
@@ -123,9 +125,11 @@ export function Backtest12WChart({
 export function SandboxCurveChart({
   curve,
   theme,
+  benchmarkLabel = "S&P 500",
 }: {
   curve: { date: string; portfolioPct: number; setPct: number }[];
   theme: "dark" | "light";
+  benchmarkLabel?: string;
 }) {
   if (curve.length === 0) return null;
   const formatted = curve.map((c) => ({ ...c, shortDate: c.date.slice(5) }));
@@ -158,7 +162,7 @@ export function SandboxCurveChart({
           <Line
             type="monotone"
             dataKey="setPct"
-            name="SET Index (%)"
+            name={`${benchmarkLabel} (%)`}
             stroke="#f59e0b"
             strokeWidth={1.8}
             strokeDasharray="4 4"
@@ -172,7 +176,7 @@ export function SandboxCurveChart({
 
 export function DimensionScoreBars({ scores }: { scores: DimensionScore }) {
   const rows = [
-    { label: "IAA/พื้นฐาน", val: scores.fundamentalIaa, color: "bg-sky-500" },
+    { label: "Consensus/พื้นฐาน", val: scores.fundamentalIaa, color: "bg-sky-500" },
     { label: "เทรนด์เทคนิค", val: scores.technicalTrend, color: "bg-emerald-500" },
     { label: "โมเมนตัม/วอลุ่ม", val: scores.momentumVolume, color: "bg-indigo-500" },
     { label: "Time Machine", val: scores.timeMachineEdge, color: "bg-amber-500" },

@@ -75,13 +75,13 @@ export default function LoginPage() {
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-xl font-bold tracking-tight text-white">
-                SET <span className="text-sky-400">360° AI</span>
+                GLOBAL <span className="text-sky-400">360° AI</span>
               </h1>
               <span className="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30">
                 Terminal
               </span>
             </div>
-            <p className="text-xs text-slate-400">ผู้ช่วยวิเคราะห์หุ้นไทยอัจฉริยะ 360°</p>
+            <p className="text-xs text-slate-400">วิเคราะห์หุ้นต่างประเทศ 360° · สหรัฐฯ · ฮ่องกง · จีน · DR</p>
           </div>
         </div>
 
@@ -90,7 +90,7 @@ export default function LoginPage() {
           <div className="text-xs text-slate-300 leading-relaxed">
             <span className="font-semibold text-white">ยืนยันรหัสผ่านส่วนตัวก่อนเข้าใช้งาน</span>
             <br />
-            ผ่านหน้านี้ครั้งเดียวต่อเซสชัน ปลดล็อกครบทั้ง 5 เมนู (ข่าวตลาด, วิเคราะห์หุ้น + Time Machine 10,000 รอบ, สแกน SET50, AI Chat Bot และพอร์ตจำลอง 360°)
+            ผ่านหน้านี้ครั้งเดียวต่อเซสชัน ปลดล็อกครบทั้ง 5 เมนู (ข่าวตลาดโลก, วิเคราะห์หุ้นสหรัฐฯ-ฮ่องกง-จีน-DR + Time Machine 10,000 รอบ, สแกนกราฟ & แนวรับ-ต้าน, AI Chat Bot และพอร์ตจำลอง 360°)
           </div>
         </div>
 
@@ -177,7 +177,7 @@ export default function LoginPage() {
             ) : (
               <>
                 <ShieldCheck className="h-4 w-4" />
-                เข้าสู่ระบบ SET 360° AI
+                เข้าสู่ระบบ GLOBAL 360° AI
               </>
             )}
           </button>
